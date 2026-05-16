@@ -51,6 +51,7 @@ class ScanState:
     def __init__(self):
         self.lock = threading.Lock()
         self.running = False
+        self.stop_requested = False
         self.started_at: float | None = None
         self.finished_at: float | None = None
         self.message = "idle"
@@ -62,12 +63,21 @@ class ScanState:
     def reset(self):
         with self.lock:
             self.running = True
+            self.stop_requested = False
             self.started_at = time.time()
             self.finished_at = None
             self.message = "扫描中..."
             self.error = None
             self.progress = {"total": 0, "scanned": 0, "ok": 0, "fail": 0, "hit": 0}
             self._results = []
+
+    def request_stop(self):
+        with self.lock:
+            self.stop_requested = True
+
+    def is_stop_requested(self) -> bool:
+        with self.lock:
+            return self.stop_requested
 
     def push_result(self, row_dict: dict):
         with self.lock:
@@ -96,6 +106,7 @@ class ScanState:
             top = sorted(self._results, key=lambda r: -r.get("score", 0))[: self.MAX_LIVE_ROWS]
             return {
                 "running": self.running,
+                "stop_requested": self.stop_requested,
                 "message": self.message,
                 "error": self.error,
                 "elapsed_sec": elapsed,
@@ -185,9 +196,13 @@ def _run_scan_background(cfg: dict):
         STATE.update_progress(prog, message=msg)
 
     try:
-        rows = scan_market(cfg, on_result=on_result, on_progress=on_progress)
+        rows = scan_market(cfg, on_result=on_result, on_progress=on_progress,
+                           stop_flag=STATE.is_stop_requested)
 
-        STATE.update_progress(STATE.progress, message="保存快照与图表...")
+        if STATE.is_stop_requested():
+            STATE.update_progress(STATE.progress, message="已手动停止,保存部分结果...")
+        else:
+            STATE.update_progress(STATE.progress, message="保存快照与图表...")
 
         reports_dir = cfg["output"].get("reports_dir", "output/reports")
         storage.save_snapshot(rows, reports_dir)
@@ -200,7 +215,10 @@ def _run_scan_background(cfg: dict):
                 max_n=int(cfg["output"].get("max_charts", 20)),
             )
 
-        STATE.finish(f"完成,命中 {len(rows)} 只")
+        if STATE.is_stop_requested():
+            STATE.finish(f"已手动停止 (扫到 {len(rows)} 只命中)")
+        else:
+            STATE.finish(f"完成,命中 {len(rows)} 只")
     except Exception as e:
         log.exception("扫描失败")
         STATE.finish("扫描失败", error=str(e))
@@ -311,6 +329,17 @@ def trigger_scan(watchlist_only: bool = False):
 @app.get("/api/scan/status")
 def scan_status():
     return STATE.to_dict()
+
+
+@app.post("/api/scan/stop")
+def stop_scan():
+    with STATE.lock:
+        if not STATE.running:
+            raise HTTPException(409, "当前没有正在运行的扫描")
+        if STATE.stop_requested:
+            return {"ok": True, "message": "已经请求停止,正在等待退出"}
+    STATE.request_stop()
+    return {"ok": True, "message": "已发送停止信号"}
 
 
 @app.get("/api/snapshots")
@@ -438,12 +467,52 @@ def backtest_report_file(filename: str):
 # ============================================================
 # 特别关注 (Watchlist)
 # ============================================================
+def _quotes_from_daily(codes: list[str]) -> dict[str, dict]:
+    """从日K线缓存/akshare 拿最新一根,组装成与实时快照相同 schema 的字典。
+    用于非交易时段——既不依赖盘中行情接口,又能复用现有 K 线缓存。"""
+    out: dict[str, dict] = {}
+    bars = 5  # 少量足够算涨跌
+    for code in codes:
+        df = data_loader.fetch_kline(
+            code, bars=bars,
+            adjust=_CFG["data"].get("adjust", "qfq"),
+            cache_dir=_CFG["data"].get("cache_dir", "cache"),
+            cache_ttl_hours=int(_CFG["data"].get("cache_ttl_hours", 6)),
+        )
+        if df is None or len(df) < 2:
+            continue
+        last = df.iloc[-1]
+        prev_close = float(df["close"].iloc[-2])
+        cur = float(last["close"])
+        chg = cur - prev_close
+        chg_pct = chg / prev_close * 100 if prev_close else 0.0
+        out[code] = {
+            "code": code,
+            "name": _NAME_CACHE.get(code, code),
+            "price": cur,
+            "prev_close": prev_close,
+            "chg": chg,
+            "chg_pct": chg_pct,
+            "volume": float(last["volume"]),
+            "open": float(last["open"]),
+            "high": float(last["high"]),
+            "low": float(last["low"]),
+        }
+    return out
+
+
 def _enrich_watchlist(items: list[dict]) -> list[dict]:
-    """给每条关注项补上实时行情 + 持仓盈亏"""
+    """给每条关注项补上行情 + 持仓盈亏。
+    交易时段走 realtime spot,非交易时段走日 K 线收盘。"""
     if not items:
         return []
     codes = [it["code"] for it in items]
-    quotes = realtime.get_quotes(codes)
+    # 名称缓存预热 (供 _quotes_from_daily 用)
+    _get_name(codes[0])
+    if realtime.is_trading_hours():
+        quotes = realtime.get_quotes(codes)
+    else:
+        quotes = _quotes_from_daily(codes)
     out = []
     for it in items:
         q = quotes.get(it["code"], {})
@@ -577,7 +646,10 @@ def _get_name(code: str) -> str:
     global _NAME_CACHE_LOADED_AT
     if (time.time() - _NAME_CACHE_LOADED_AT) > _NAME_CACHE_TTL_SEC:
         try:
-            df = data_loader.get_stock_list(exclude_st=False)
+            df = data_loader.get_stock_list(
+                exclude_st=False,
+                cache_dir=_CFG["data"].get("cache_dir", "cache"),
+            )
             _NAME_CACHE.clear()
             _NAME_CACHE.update(dict(zip(df["code"], df["name"])))
             _NAME_CACHE_LOADED_AT = time.time()

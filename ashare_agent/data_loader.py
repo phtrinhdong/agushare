@@ -23,29 +23,87 @@ log = logging.getLogger("ashare_agent")
 # ============================================================
 # 股票池
 # ============================================================
+_STOCK_LIST_CACHE_FILE = "stock_list.parquet"
+_STOCK_LIST_CACHE_TTL_HOURS = 24
+_STOCK_LIST_RETRY = 3
+
+
+def _fetch_stock_list_raw() -> pd.DataFrame:
+    """直接调 akshare,带重试。"""
+    last_err = None
+    for attempt in range(_STOCK_LIST_RETRY):
+        try:
+            time.sleep(random.uniform(0.1, 0.5))
+            df = ak.stock_info_a_code_name()
+            if df is None or df.empty:
+                raise RuntimeError("akshare 返回空")
+            return df
+        except Exception as e:  # noqa
+            last_err = e
+            log.warning("get_stock_list 第 %d 次失败: %s", attempt + 1, e)
+            time.sleep((2 ** attempt) + random.uniform(0, 0.5))
+    raise RuntimeError(f"get_stock_list 重试 {_STOCK_LIST_RETRY} 次仍失败: {last_err}")
+
+
 def get_stock_list(
     exclude_chinext_star: bool = False,
     exclude_st: bool = True,
     min_listed_days: int = 120,
+    cache_dir: str | Path = "cache",
 ) -> pd.DataFrame:
-    """返回 [code, name] 两列的 DataFrame。"""
+    """返回 [code, name] 两列的 DataFrame。
+    带 24h 缓存; akshare 失败时降级到旧缓存; 实在没缓存才抛异常。"""
     if ak is None:
         raise RuntimeError("akshare 未安装，请先 pip install akshare")
 
-    # ak.stock_info_a_code_name() 返回所有 A股 [code, name]
-    df = ak.stock_info_a_code_name()
-    df = df.rename(columns={"code": "code", "name": "name"})
-    df["code"] = df["code"].astype(str).str.zfill(6)
+    cache_path_dir = ensure_dir(cache_dir)
+    cache_fp = cache_path_dir / _STOCK_LIST_CACHE_FILE
 
+    # ---- 1. 优先用新鲜缓存 ----
+    if _is_cache_fresh(cache_fp, _STOCK_LIST_CACHE_TTL_HOURS):
+        try:
+            df = pd.read_parquet(cache_fp)
+            log.debug("股票列表用缓存 (%d 只)", len(df))
+            return _filter_stock_list(df, exclude_chinext_star, exclude_st)
+        except Exception as e:
+            log.warning("读股票列表缓存失败,重新拉: %s", e)
+
+    # ---- 2. 拉新 (带重试) ----
+    try:
+        df = _fetch_stock_list_raw()
+        df = df.rename(columns={"code": "code", "name": "name"})
+        df["code"] = df["code"].astype(str).str.zfill(6)
+        df = df[["code", "name"]]
+        try:
+            df.to_parquet(cache_fp)
+        except Exception as e:
+            log.debug("写股票列表缓存失败: %s", e)
+        log.info("股票列表已刷新: %d 只", len(df))
+        return _filter_stock_list(df, exclude_chinext_star, exclude_st)
+    except Exception as e:
+        log.error("akshare 拉取股票列表失败: %s", e)
+
+    # ---- 3. 降级: 用旧缓存 (即使过期) ----
+    if cache_fp.exists():
+        try:
+            df = pd.read_parquet(cache_fp)
+            log.warning("回退到旧缓存的股票列表 (%d 只),建议稍后重试", len(df))
+            return _filter_stock_list(df, exclude_chinext_star, exclude_st)
+        except Exception:
+            pass
+
+    raise RuntimeError("股票列表既拉不到也没缓存,扫描无法进行")
+
+
+def _filter_stock_list(df: pd.DataFrame,
+                       exclude_chinext_star: bool,
+                       exclude_st: bool) -> pd.DataFrame:
     if exclude_st:
         df = df[~df["name"].str.contains("ST|退", case=False, na=False)]
-
     if exclude_chinext_star:
         df = df[~df["code"].str.startswith(("30", "68", "8", "4"))]
     else:
-        # 至少排除北交所/新三板 (4/8 开头),数据接口经常缺
         df = df[~df["code"].str.startswith(("8", "4", "9"))]
-
     df = df.reset_index(drop=True)
     log.info("候选股票数: %d", len(df))
     return df

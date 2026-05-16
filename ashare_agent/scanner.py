@@ -53,6 +53,16 @@ def _round(v):
     return None if v is None else round(v, 2)
 
 
+def _load_watchlist_codes() -> list[str]:
+    """读 UI 管理的特别关注列表的代码,文件不存在或空则返回 []"""
+    try:
+        from . import watchlist as wl
+        items = wl.load_all()
+        return [it["code"] for it in items if it.get("code")]
+    except Exception:
+        return []
+
+
 def _short_term_gains(df: pd.DataFrame) -> tuple[float | None, float | None, float | None]:
     """返回 (5日, 15日, 30日) 涨跌幅 %,数据不足返回 None"""
     closes = df["close"]
@@ -109,11 +119,13 @@ def scan_market(
     cfg: dict,
     on_result: Callable[[SignalRow], None] | None = None,
     on_progress: Callable[[dict], None] | None = None,
+    stop_flag: Callable[[], bool] | None = None,
 ) -> list[SignalRow]:
     """
     扫描全市场 / 自选股。
     on_result(row)    每命中一只股票回调一次 (实时推到 Web)
-    on_progress(stat) 每只处理完回调一次,stat = {total, scanned, ok, fail, hit}
+    on_progress(stat) 每只处理完回调一次
+    stop_flag()       周期性检查;若返回 True 则中途停止,已完成的结果照常保留
     """
     universe_cfg = cfg["universe"]
     data_cfg = cfg["data"]
@@ -123,19 +135,30 @@ def scan_market(
     runtime_cfg = cfg.get("runtime", {})
 
     # ---- 选股池 ----
+    cache_dir_cfg = data_cfg.get("cache_dir", "cache")
     if universe_cfg.get("scan_all", True):
-        stock_df = data_loader.get_stock_list(
-            exclude_chinext_star=universe_cfg.get("exclude_chinext_star", False),
-            exclude_st=universe_cfg.get("exclude_st", True),
-            min_listed_days=universe_cfg.get("min_listed_days", 120),
-        )
+        try:
+            stock_df = data_loader.get_stock_list(
+                exclude_chinext_star=universe_cfg.get("exclude_chinext_star", False),
+                exclude_st=universe_cfg.get("exclude_st", True),
+                min_listed_days=universe_cfg.get("min_listed_days", 120),
+                cache_dir=cache_dir_cfg,
+            )
+        except Exception as e:
+            log.error("无法获取股票列表,扫描中止: %s", e)
+            return []
         codes = stock_df["code"].tolist()
         names = dict(zip(stock_df["code"], stock_df["name"]))
     else:
-        codes = [str(c).zfill(6) for c in universe_cfg.get("watchlist", [])]
-        # 仅这些股票，名称用 akshare 查一下
+        # 优先用 UI 管理的"特别关注"列表 (data/watchlist.json)
+        # 为空时降级到 config.yaml 的 universe.watchlist (向后兼容)
+        codes = _load_watchlist_codes()
+        if not codes:
+            codes = [str(c).zfill(6) for c in universe_cfg.get("watchlist", [])]
         try:
-            stock_df = data_loader.get_stock_list(exclude_st=False)
+            stock_df = data_loader.get_stock_list(
+                exclude_st=False, cache_dir=cache_dir_cfg,
+            )
             names = dict(zip(stock_df["code"], stock_df["name"]))
         except Exception:
             names = {}
@@ -164,10 +187,20 @@ def scan_market(
     results: list[SignalRow] = []
     ok_cnt = 0
     total = len(codes)
+    stopped = False
     with ThreadPoolExecutor(max_workers=workers) as exe:
         futures = {exe.submit(_job, c): c for c in codes}
         pbar = tqdm(as_completed(futures), total=total, desc="扫描")
         for fut in pbar:
+            # 检查停止信号
+            if stop_flag is not None and stop_flag():
+                stopped = True
+                # 取消还没开始的任务,正在跑的让它们自然结束
+                for f in futures:
+                    if not f.done():
+                        f.cancel()
+                log.info("收到停止信号,已取消剩余 future")
+                break
             try:
                 status, code, r = fut.result()
             except Exception as e:  # noqa
@@ -203,7 +236,8 @@ def scan_market(
                 pbar.set_postfix(ok=ok_cnt, fail=len(failed_codes),
                                  hit=len(results))
 
-    log.info("扫描完成: 成功 %d / 失败 %d / 命中信号 %d",
+    log.info("扫描%s: 成功 %d / 失败 %d / 命中信号 %d",
+             "已停止" if stopped else "完成",
              ok_cnt, len(failed_codes), len(results))
 
     # 把失败列表落盘,便于补扫
