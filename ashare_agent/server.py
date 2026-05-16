@@ -27,10 +27,14 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 
-from . import reporter, storage, visualizer
-from .patterns import list_all
-from .scanner import scan_market
-from .utils import ensure_dir, load_config, setup_logger
+from . import data_loader, reporter, storage, visualizer
+from .patterns import (
+    detect_candlestick_patterns,
+    detect_indicator_signals,
+    list_all,
+)
+from .scanner import SignalRow, scan_market
+from .utils import ensure_dir, load_config, project_path, setup_logger
 
 log = logging.getLogger("ashare_agent")
 
@@ -255,17 +259,93 @@ def list_snapshots():
     return {"items": storage.list_snapshots(reports_dir)}
 
 
-@app.get("/api/chart/{code}")
-def get_chart(code: str):
+# ============================================================
+# 股票名称缓存 (用于按需绘图时拿到中文名)
+# ============================================================
+_NAME_CACHE: dict[str, str] = {}
+_NAME_CACHE_LOADED_AT: float = 0
+_NAME_CACHE_TTL_SEC = 24 * 3600  # 24h
+
+
+def _get_name(code: str) -> str:
+    global _NAME_CACHE_LOADED_AT
+    if (time.time() - _NAME_CACHE_LOADED_AT) > _NAME_CACHE_TTL_SEC:
+        try:
+            df = data_loader.get_stock_list(exclude_st=False)
+            _NAME_CACHE.clear()
+            _NAME_CACHE.update(dict(zip(df["code"], df["name"])))
+            _NAME_CACHE_LOADED_AT = time.time()
+        except Exception as e:
+            log.warning("加载股票名称失败: %s", e)
+    return _NAME_CACHE.get(code, code)
+
+
+def _resolve_charts_dir() -> Path:
     charts_dir = Path(_CFG["output"].get("charts_dir", "output/charts"))
-    # 找最新的同代码 PNG
     if not charts_dir.is_absolute():
-        from .utils import project_path
         charts_dir = project_path(str(charts_dir))
-    candidates = sorted(charts_dir.glob(f"{code}_*.png"), reverse=True)
-    if not candidates:
-        raise HTTPException(404, f"未找到 {code} 的K线图")
-    return FileResponse(candidates[0], media_type="image/png")
+    return charts_dir
+
+
+@app.get("/api/chart/{code}")
+def get_chart(code: str, fresh: bool = False):
+    """
+    返回该股票的 K线 PNG。
+    - 默认先返回今天的缓存 PNG (如果存在)
+    - 没有就现场拉 K 线 → 识别信号 → 绘图 → 写盘 → 返回
+    - fresh=true 强制重新绘图
+    """
+    code = code.zfill(6)
+    charts_dir = _resolve_charts_dir()
+    today = time.strftime("%Y%m%d")
+    cached = charts_dir / f"{code}_{today}.png"
+
+    if cached.exists() and not fresh:
+        return FileResponse(cached, media_type="image/png")
+
+    # ---------- 按需生成 ----------
+    bars = int(_CFG["data"].get("bars", 120))
+    df = data_loader.fetch_kline(
+        code,
+        bars=bars,
+        adjust=_CFG["data"].get("adjust", "qfq"),
+        cache_dir=_CFG["data"].get("cache_dir", "cache"),
+        cache_ttl_hours=int(_CFG["data"].get("cache_ttl_hours", 6)),
+    )
+    if df is None or df.empty:
+        raise HTTPException(404, f"未拿到 {code} 的K线数据 (数据源可能临时不可用)")
+
+    # 重新检测形态/指标,用于在图上标注
+    pat_cfg = _CFG["patterns"]
+    candles = detect_candlestick_patterns(df, pat_cfg)
+    inds = detect_indicator_signals(df, pat_cfg)
+
+    last = df.iloc[-1]
+    prev_close = df["close"].iloc[-2] if len(df) > 1 else last["close"]
+    chg = (last["close"] - prev_close) / prev_close * 100 if prev_close else 0.0
+    score = sum(h["score"] for h in candles) + sum(h["score"] for h in inds)
+
+    row = SignalRow(
+        code=code,
+        name=_get_name(code),
+        close=float(last["close"]),
+        chg_pct=float(chg),
+        score=score,
+        candlestick=[h["desc"] for h in candles],
+        indicators=[h["desc"] for h in inds],
+        df=df,
+    )
+
+    try:
+        fp = visualizer.draw_signal_chart(row, charts_dir)
+    except Exception as e:
+        log.exception("绘图失败 %s", code)
+        raise HTTPException(500, f"绘图失败: {e}")
+
+    if fp is None or not fp.exists():
+        raise HTTPException(500, "绘图失败 (mplfinance 未安装或返回空)")
+
+    return FileResponse(fp, media_type="image/png")
 
 
 # 静态文件 (备用，比如未来加 css/js 单独文件)

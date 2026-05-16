@@ -133,6 +133,36 @@
     background: none; border: none; font-size: 18px;
   }
   .modal h3 { margin: 0 0 12px; font-size: 15px; }
+  .modal .body {
+    min-width: 420px; min-height: 280px;
+    display: flex; align-items: center; justify-content: center;
+    flex-direction: column;
+  }
+  .spinner {
+    width: 36px; height: 36px;
+    border: 3px solid var(--panel-2);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.9s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .modal .hint {
+    color: var(--muted); margin-top: 14px; font-size: 13px;
+    text-align: center; line-height: 1.5; max-width: 380px;
+  }
+  .modal .error {
+    color: var(--up); margin-top: 8px; font-size: 13px;
+    background: rgba(239, 79, 79, 0.08);
+    border: 1px solid rgba(239, 79, 79, 0.3);
+    padding: 10px 14px; border-radius: 6px;
+    max-width: 460px; text-align: center;
+  }
+  .modal .retry {
+    margin-top: 12px; padding: 5px 14px; cursor: pointer;
+    background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 4px;
+    font-size: 12px;
+  }
 
   .summary {
     display: flex; gap: 14px; margin-bottom: 14px; flex-wrap: wrap;
@@ -232,7 +262,10 @@
   <div class="inner" onclick="event.stopPropagation()">
     <button class="close" onclick="closeModal()">×</button>
     <h3 id="modalTitle">K线图</h3>
-    <img id="modalImg" alt="K线图" />
+    <div class="body" id="modalBody">
+      <div class="spinner"></div>
+      <div class="hint" id="modalHint">正在拉取数据并生成 K 线图，首次生成约 3-5 秒…</div>
+    </div>
   </div>
 </div>
 
@@ -441,10 +474,39 @@ function startPolling() {
 }
 
 // ---- K线图弹窗 ----
-function openChart(code, name) {
+let CHART_REQ_ID = 0;
+async function openChart(code, name) {
   $("modalTitle").textContent = code + " " + (name || "");
-  $("modalImg").src = "/api/chart/" + code + "?t=" + Date.now();
+  // 初始状态: loading
+  $("modalBody").innerHTML =
+    '<div class="spinner"></div>' +
+    '<div class="hint">正在拉取数据并生成 K 线图，首次生成约 3-5 秒…</div>';
   $("modal").classList.add("show");
+
+  const reqId = ++CHART_REQ_ID;
+  const url = "/api/chart/" + code + "?t=" + Date.now();
+
+  try {
+    const resp = await fetch(url);
+    if (reqId !== CHART_REQ_ID) return;     // 用户已点了别的
+    if (!resp.ok) {
+      let detail = "";
+      try { detail = (await resp.json()).detail || ""; } catch (e) {}
+      throw new Error(detail || `HTTP ${resp.status}`);
+    }
+    const blob = await resp.blob();
+    if (reqId !== CHART_REQ_ID) return;
+    const imgUrl = URL.createObjectURL(blob);
+    $("modalBody").innerHTML =
+      `<img src="${imgUrl}" alt="K线图" style="max-width:100%;max-height:80vh"/>`;
+  } catch (e) {
+    if (reqId !== CHART_REQ_ID) return;
+    $("modalBody").innerHTML =
+      `<div class="error">生成 K 线图失败：${e.message || e}</div>` +
+      `<button class="retry" onclick="openChart('${code}','${name||""}')">重试</button>` +
+      `<div class="hint">可能原因：数据源临时不可达 / 此股票数据不足 / mplfinance 未安装。<br>` +
+      `日志: <code>docker compose logs web</code></div>`;
+  }
 }
 function closeModal(e) {
   if (e && e.target.id !== "modal" && e.type === "click") return;
