@@ -20,6 +20,7 @@ try:
     import matplotlib
     matplotlib.use("Agg")  # 无 GUI 环境
     import matplotlib.pyplot as plt
+    import matplotlib.font_manager as fm
     import mplfinance as mpf
     _HAS_MPF = True
 except Exception:
@@ -27,15 +28,67 @@ except Exception:
     log.warning("mplfinance 未安装,跳过K线图绘制")
 
 
-# 中文字体（尽量优雅地降级）
+# ---------- 中文字体自动检测 ----------
+# 候选字体覆盖 Linux / macOS / Windows;启动时挑第一个真实存在的
+_CHINESE_FONT_CANDIDATES = [
+    # Linux (Debian/Ubuntu, fonts-noto-cjk 包提供)
+    "Noto Sans CJK SC",
+    "Noto Sans CJK JP",
+    "Noto Sans SC",
+    "Noto Serif CJK SC",
+    "WenQuanYi Zen Hei",
+    "WenQuanYi Micro Hei",
+    "Source Han Sans SC",
+    # macOS
+    "PingFang SC",
+    "Hiragino Sans GB",
+    "STHeiti",
+    # Windows
+    "Microsoft YaHei",
+    "SimHei",
+    "SimSun",
+    # 跨平台
+    "Arial Unicode MS",
+    "DejaVu Sans",
+]
+
+_CHINESE_FONT: str | None = None
+
+
+def _detect_chinese_font() -> str | None:
+    global _CHINESE_FONT
+    if _CHINESE_FONT is not None:
+        return _CHINESE_FONT
+    if not _HAS_MPF:
+        return None
+    try:
+        available = {f.name for f in fm.fontManager.ttflist}
+        for name in _CHINESE_FONT_CANDIDATES:
+            if name in available:
+                _CHINESE_FONT = name
+                log.info("K线图使用中文字体: %s", name)
+                return name
+        log.warning("未找到任何中文字体,K线图可能出现豆腐块 □□。"
+                    "已尝试: %s。建议在容器中 apt install fonts-noto-cjk",
+                    ", ".join(_CHINESE_FONT_CANDIDATES[:5]) + "...")
+    except Exception as e:
+        log.warning("字体检测失败: %s", e)
+    return None
+
+
 def _setup_chinese_font():
+    if not _HAS_MPF:
+        return
     try:
         from matplotlib import rcParams
-        rcParams["font.sans-serif"] = ["PingFang SC", "Hiragino Sans GB",
-                                       "Microsoft YaHei", "SimHei", "Arial Unicode MS"]
+        font = _detect_chinese_font()
+        if font:
+            rcParams["font.sans-serif"] = [font] + _CHINESE_FONT_CANDIDATES
+        else:
+            rcParams["font.sans-serif"] = _CHINESE_FONT_CANDIDATES
         rcParams["axes.unicode_minus"] = False
-    except Exception:
-        pass
+    except Exception as e:
+        log.debug("setup_chinese_font 失败: %s", e)
 
 
 def _make_style():
@@ -43,10 +96,13 @@ def _make_style():
         up="red", down="green",
         edge="inherit", wick="inherit", volume="inherit",
     )
-    return mpf.make_mpf_style(marketcolors=mc, gridstyle="--", y_on_right=False,
-                              rc={"font.sans-serif": ["PingFang SC", "Microsoft YaHei",
-                                                      "SimHei", "Arial Unicode MS"],
-                                  "axes.unicode_minus": False})
+    font = _detect_chinese_font()
+    rc = {"axes.unicode_minus": False}
+    if font:
+        rc["font.sans-serif"] = [font] + _CHINESE_FONT_CANDIDATES
+    else:
+        rc["font.sans-serif"] = _CHINESE_FONT_CANDIDATES
+    return mpf.make_mpf_style(marketcolors=mc, gridstyle="--", y_on_right=False, rc=rc)
 
 
 def draw_signal_chart(row: SignalRow, out_dir: str | Path,
