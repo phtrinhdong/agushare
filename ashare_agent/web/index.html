@@ -135,7 +135,7 @@
   .modal h3 { margin: 0 0 12px; font-size: 15px; }
 
   .summary {
-    display: flex; gap: 14px; margin-bottom: 14px;
+    display: flex; gap: 14px; margin-bottom: 14px; flex-wrap: wrap;
   }
   .summary .card {
     background: var(--panel); border: 1px solid var(--border);
@@ -143,6 +143,33 @@
   }
   .summary .card .label { font-size: 11px; color: var(--muted); text-transform: uppercase; }
   .summary .card .value { font-size: 20px; font-weight: 600; margin-top: 3px; }
+  .summary .card .value.fail { color: var(--up); }
+  .summary .card .value.ok { color: var(--down); }
+
+  /* 进度条 */
+  .progress {
+    margin: 0 0 14px;
+    display: none;
+  }
+  .progress.show { display: block; }
+  .progress .bar {
+    height: 6px; background: var(--panel-2); border-radius: 3px; overflow: hidden;
+  }
+  .progress .fill {
+    height: 100%; background: linear-gradient(90deg, var(--accent), #6fa0ff);
+    width: 0%; transition: width .4s ease;
+  }
+  .progress .text {
+    margin-top: 6px; color: var(--muted); font-size: 12px;
+    font-variant-numeric: tabular-nums;
+  }
+  tbody tr.new-hit {
+    animation: flash 1.2s ease-out;
+  }
+  @keyframes flash {
+    from { background: rgba(79, 140, 255, 0.25); }
+    to   { background: transparent; }
+  }
 </style>
 </head>
 <body>
@@ -173,7 +200,14 @@
   <div class="summary">
     <div class="card"><div class="label">命中</div><div class="value" id="cardCount">0</div></div>
     <div class="card"><div class="label">最高得分</div><div class="value" id="cardMaxScore">—</div></div>
+    <div class="card"><div class="label">已扫描</div><div class="value ok" id="cardScanned">0</div></div>
+    <div class="card"><div class="label">失败</div><div class="value fail" id="cardFailed">0</div></div>
     <div class="card"><div class="label">当前显示</div><div class="value" id="cardVisible">0</div></div>
+  </div>
+
+  <div class="progress" id="progress">
+    <div class="bar"><div class="fill" id="progressFill"></div></div>
+    <div class="text" id="progressText">—</div>
   </div>
 
   <table id="tbl">
@@ -207,9 +241,24 @@ let DATA = { results: [], scanned_at: null };
 let SORT_KEY = "score";
 let SORT_DIR = -1;  // 1 升序, -1 降序
 let POLL_TIMER = null;
+let LIVE_MODE = false;            // 扫描中?
+let LIVE_PREV_CODES = new Set();  // 上次轮询时已存在的代码,用于高亮新命中
 
 const $ = (id) => document.getElementById(id);
 const fmt2 = (n) => (typeof n === "number" ? n.toFixed(2) : n);
+
+function refreshPatternFilter(rows) {
+  const patternSet = new Set();
+  rows.forEach(r => {
+    (r.candlestick || []).forEach(x => patternSet.add(x));
+    (r.indicators || []).forEach(x => patternSet.add(x));
+  });
+  const sel = $("filterPattern");
+  const current = sel.value;
+  sel.innerHTML = '<option value="">全部形态</option>' +
+    [...patternSet].sort().map(p => `<option value="${p}">${p}</option>`).join("");
+  if (current && patternSet.has(current)) sel.value = current;
+}
 
 async function loadSignals() {
   const r = await fetch("/api/signals");
@@ -222,16 +271,31 @@ async function loadSignals() {
   const maxScore = (data.results || []).reduce((m, r) => Math.max(m, r.score || 0), 0);
   $("cardMaxScore").textContent = maxScore || "—";
 
-  // 收集所有形态名称 → 填充筛选下拉
-  const patternSet = new Set();
-  (data.results || []).forEach(r => {
-    (r.candlestick || []).forEach(x => patternSet.add(x));
-    (r.indicators || []).forEach(x => patternSet.add(x));
-  });
-  const sel = $("filterPattern");
-  sel.innerHTML = '<option value="">全部形态</option>' +
-    [...patternSet].sort().map(p => `<option value="${p}">${p}</option>`).join("");
+  refreshPatternFilter(data.results || []);
+  renderTable();
+}
 
+// 扫描中：用 status 里的 results 实时刷表
+function applyLiveStatus(s) {
+  const rows = s.results || [];
+  DATA = { results: rows, scanned_at: null };
+
+  $("cardCount").textContent = (s.progress && s.progress.hit) || rows.length;
+  const maxScore = rows.reduce((m, r) => Math.max(m, r.score || 0), 0);
+  $("cardMaxScore").textContent = maxScore || "—";
+  $("cardScanned").textContent = (s.progress && s.progress.scanned) || 0;
+  $("cardFailed").textContent  = (s.progress && s.progress.fail) || 0;
+
+  // 进度条
+  const total = (s.progress && s.progress.total) || 0;
+  const scanned = (s.progress && s.progress.scanned) || 0;
+  const pct = total > 0 ? Math.min(100, (scanned / total) * 100) : 0;
+  $("progress").classList.add("show");
+  $("progressFill").style.width = pct.toFixed(1) + "%";
+  $("progressText").textContent =
+    `${scanned} / ${total}  (${pct.toFixed(1)}%) · 命中 ${(s.progress&&s.progress.hit)||0} · 失败 ${(s.progress&&s.progress.fail)||0}`;
+
+  refreshPatternFilter(rows);
   renderTable();
 }
 
@@ -268,11 +332,15 @@ function renderTable() {
   $("empty").style.display = "none";
   $("cardVisible").textContent = rows.length;
 
+  const currentCodes = new Set(rows.map(r => r.code));
   tbody.innerHTML = rows.map(r => {
     const chgCls = r.chg_pct > 0 ? "up" : (r.chg_pct < 0 ? "down" : "");
     const candles = (r.candlestick || []).map(c => `<span class="badge">${c}</span>`).join("");
     const inds = (r.indicators || []).map(c => `<span class="badge indicator">${c}</span>`).join("");
-    return `<tr>
+    // 实时模式下,新出现的行加 flash 动画
+    const isNew = LIVE_MODE && !LIVE_PREV_CODES.has(r.code);
+    const rowCls = isNew ? "new-hit" : "";
+    return `<tr class="${rowCls}">
       <td class="code">${r.code}</td>
       <td>${r.name || ""}</td>
       <td class="num">${fmt2(r.close)}</td>
@@ -283,6 +351,7 @@ function renderTable() {
       <td><a href="#" onclick="openChart('${r.code}','${r.name||""}');return false;">查看K线</a></td>
     </tr>`;
   }).join("");
+  LIVE_PREV_CODES = currentCodes;
 
   // 表头排序箭头
   document.querySelectorAll("th[data-sort]").forEach(th => {
@@ -338,6 +407,8 @@ $("btnRefresh").addEventListener("click", loadSignals);
 
 function startPolling() {
   if (POLL_TIMER) clearInterval(POLL_TIMER);
+  LIVE_MODE = true;
+  LIVE_PREV_CODES = new Set();
   POLL_TIMER = setInterval(async () => {
     try {
       const r = await fetch("/api/scan/status");
@@ -347,14 +418,25 @@ function startPolling() {
       const cls = s.error ? "error" : (s.running ? "running" : "done");
       $("status").className = "status " + cls;
 
-      if (!s.running) {
+      // 扫描中：用 status 里的 results 刷表(边扫边显示)
+      if (s.running) {
+        applyLiveStatus(s);
+      } else {
         clearInterval(POLL_TIMER);
         POLL_TIMER = null;
+        LIVE_MODE = false;
         $("btnScan").disabled = false;
         $("btnScanWatchlist").disabled = false;
-        if (!s.error) await loadSignals();
+        // 扫完隐藏进度条,从 /api/signals 拉最终结果(已落盘的)
+        $("progress").classList.remove("show");
+        if (!s.error) {
+          await loadSignals();
+        } else {
+          // 失败也保留当前已扫出的部分结果
+          applyLiveStatus(s);
+        }
       }
-    } catch (e) { /* ignore */ }
+    } catch (e) { /* ignore 网络抖动 */ }
   }, 1500);
 }
 

@@ -6,7 +6,7 @@ from __future__ import annotations
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 import pandas as pd
 from tqdm import tqdm
@@ -82,7 +82,16 @@ def scan_one(
 # ============================================================
 # 批量扫描
 # ============================================================
-def scan_market(cfg: dict) -> list[SignalRow]:
+def scan_market(
+    cfg: dict,
+    on_result: Callable[[SignalRow], None] | None = None,
+    on_progress: Callable[[dict], None] | None = None,
+) -> list[SignalRow]:
+    """
+    扫描全市场 / 自选股。
+    on_result(row)    每命中一只股票回调一次 (实时推到 Web)
+    on_progress(stat) 每只处理完回调一次,stat = {total, scanned, ok, fail, hit}
+    """
     universe_cfg = cfg["universe"]
     data_cfg = cfg["data"]
     pattern_cfg = cfg["patterns"]
@@ -128,23 +137,42 @@ def scan_market(cfg: dict) -> list[SignalRow]:
 
     results: list[SignalRow] = []
     ok_cnt = 0
+    total = len(codes)
     with ThreadPoolExecutor(max_workers=workers) as exe:
         futures = {exe.submit(_job, c): c for c in codes}
-        pbar = tqdm(as_completed(futures), total=len(futures), desc="扫描")
+        pbar = tqdm(as_completed(futures), total=total, desc="扫描")
         for fut in pbar:
             try:
                 status, code, r = fut.result()
             except Exception as e:  # noqa
                 log.debug("扫描异常 %s: %s", futures[fut], e)
                 failed_codes.append(futures[fut])
-                continue
-            if status == "fail":
-                failed_codes.append(code)
             else:
-                ok_cnt += 1
-                if r:
-                    results.append(r)
-            # 每 200 只更新一次进度条后缀
+                if status == "fail":
+                    failed_codes.append(code)
+                else:
+                    ok_cnt += 1
+                    if r:
+                        results.append(r)
+                        if on_result is not None:
+                            try:
+                                on_result(r)
+                            except Exception:  # noqa
+                                pass
+
+            # 每只都推送进度 (Web 端用,代价很低)
+            if on_progress is not None:
+                try:
+                    on_progress({
+                        "total": total,
+                        "scanned": ok_cnt + len(failed_codes),
+                        "ok": ok_cnt,
+                        "fail": len(failed_codes),
+                        "hit": len(results),
+                    })
+                except Exception:  # noqa
+                    pass
+
             if (ok_cnt + len(failed_codes)) % 200 == 0:
                 pbar.set_postfix(ok=ok_cnt, fail=len(failed_codes),
                                  hit=len(results))

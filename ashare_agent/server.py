@@ -39,6 +39,11 @@ log = logging.getLogger("ashare_agent")
 # 全局扫描状态 (线程安全)
 # ============================================================
 class ScanState:
+    """扫描状态 + 实时进度 + 实时命中列表 (供 Web 边扫边显示)"""
+
+    # 推到前端的最大行数 (按得分排序后取前 N)
+    MAX_LIVE_ROWS = 200
+
     def __init__(self):
         self.lock = threading.Lock()
         self.running = False
@@ -46,7 +51,36 @@ class ScanState:
         self.finished_at: float | None = None
         self.message = "idle"
         self.error: str | None = None
-        self.result_count = 0
+        self.progress: dict = {"total": 0, "scanned": 0, "ok": 0, "fail": 0, "hit": 0}
+        # 命中行 (dict 形式, 与 storage._row_to_json 同 schema)
+        self._results: list[dict] = []
+
+    def reset(self):
+        with self.lock:
+            self.running = True
+            self.started_at = time.time()
+            self.finished_at = None
+            self.message = "扫描中..."
+            self.error = None
+            self.progress = {"total": 0, "scanned": 0, "ok": 0, "fail": 0, "hit": 0}
+            self._results = []
+
+    def push_result(self, row_dict: dict):
+        with self.lock:
+            self._results.append(row_dict)
+
+    def update_progress(self, prog: dict, message: str | None = None):
+        with self.lock:
+            self.progress = prog
+            if message is not None:
+                self.message = message
+
+    def finish(self, message: str, error: str | None = None):
+        with self.lock:
+            self.running = False
+            self.finished_at = time.time()
+            self.message = message
+            self.error = error
 
     def to_dict(self) -> dict:
         with self.lock:
@@ -54,14 +88,18 @@ class ScanState:
             if self.started_at:
                 end = self.finished_at or time.time()
                 elapsed = round(end - self.started_at, 1)
+            # 按得分降序,截断到 MAX_LIVE_ROWS
+            top = sorted(self._results, key=lambda r: -r.get("score", 0))[: self.MAX_LIVE_ROWS]
             return {
                 "running": self.running,
                 "message": self.message,
                 "error": self.error,
-                "result_count": self.result_count,
                 "elapsed_sec": elapsed,
                 "started_at": self.started_at,
                 "finished_at": self.finished_at,
+                "progress": self.progress,
+                "result_count": len(self._results),
+                "results": top,
             }
 
 
@@ -72,20 +110,20 @@ STATE = ScanState()
 # 后台扫描
 # ============================================================
 def _run_scan_background(cfg: dict):
-    with STATE.lock:
-        STATE.running = True
-        STATE.started_at = time.time()
-        STATE.finished_at = None
-        STATE.message = "数据拉取 + 形态识别中..."
-        STATE.error = None
-        STATE.result_count = 0
+    STATE.reset()
+
+    def on_result(row):
+        # 用 storage 里的英文 key 序列化,前端表格直接消费
+        STATE.push_result(storage._row_to_json(row))
+
+    def on_progress(prog: dict):
+        msg = f"扫描中 {prog['scanned']}/{prog['total']}  (命中 {prog['hit']}, 失败 {prog['fail']})"
+        STATE.update_progress(prog, message=msg)
 
     try:
-        rows = scan_market(cfg)
+        rows = scan_market(cfg, on_result=on_result, on_progress=on_progress)
 
-        with STATE.lock:
-            STATE.message = "保存快照与图表..."
-            STATE.result_count = len(rows)
+        STATE.update_progress(STATE.progress, message="保存快照与图表...")
 
         reports_dir = cfg["output"].get("reports_dir", "output/reports")
         storage.save_snapshot(rows, reports_dir)
@@ -98,17 +136,10 @@ def _run_scan_background(cfg: dict):
                 max_n=int(cfg["output"].get("max_charts", 20)),
             )
 
-        with STATE.lock:
-            STATE.message = f"完成,命中 {len(rows)} 只"
+        STATE.finish(f"完成,命中 {len(rows)} 只")
     except Exception as e:
         log.exception("扫描失败")
-        with STATE.lock:
-            STATE.error = str(e)
-            STATE.message = "扫描失败"
-    finally:
-        with STATE.lock:
-            STATE.running = False
-            STATE.finished_at = time.time()
+        STATE.finish("扫描失败", error=str(e))
 
 
 # ============================================================
