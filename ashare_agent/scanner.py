@@ -113,25 +113,55 @@ def scan_market(cfg: dict) -> list[SignalRow]:
     adjust = data_cfg.get("adjust", "qfq")
     cache_dir = data_cfg.get("cache_dir", "cache")
     ttl = int(data_cfg.get("cache_ttl_hours", 6))
-    workers = int(runtime_cfg.get("max_workers", 8))
+    workers = int(runtime_cfg.get("max_workers", 3))
 
     # ---- 并发拉数据 + 扫描 ----
-    def _job(code: str) -> SignalRow | None:
+    failed_codes: list[str] = []
+
+    def _job(code: str):
         df = data_loader.fetch_kline(code, bars=bars, adjust=adjust,
                                      cache_dir=cache_dir, cache_ttl_hours=ttl)
-        return scan_one(code, names.get(code, code), df, pattern_cfg, indicator_cfg)
+        if df is None:
+            return ("fail", code, None)
+        return ("ok", code,
+                scan_one(code, names.get(code, code), df, pattern_cfg, indicator_cfg))
 
     results: list[SignalRow] = []
+    ok_cnt = 0
     with ThreadPoolExecutor(max_workers=workers) as exe:
         futures = {exe.submit(_job, c): c for c in codes}
-        for fut in tqdm(as_completed(futures), total=len(futures), desc="扫描"):
+        pbar = tqdm(as_completed(futures), total=len(futures), desc="扫描")
+        for fut in pbar:
             try:
-                r = fut.result()
+                status, code, r = fut.result()
             except Exception as e:  # noqa
                 log.debug("扫描异常 %s: %s", futures[fut], e)
+                failed_codes.append(futures[fut])
                 continue
-            if r:
-                results.append(r)
+            if status == "fail":
+                failed_codes.append(code)
+            else:
+                ok_cnt += 1
+                if r:
+                    results.append(r)
+            # 每 200 只更新一次进度条后缀
+            if (ok_cnt + len(failed_codes)) % 200 == 0:
+                pbar.set_postfix(ok=ok_cnt, fail=len(failed_codes),
+                                 hit=len(results))
+
+    log.info("扫描完成: 成功 %d / 失败 %d / 命中信号 %d",
+             ok_cnt, len(failed_codes), len(results))
+
+    # 把失败列表落盘,便于补扫
+    if failed_codes:
+        try:
+            from .utils import ensure_dir, project_path
+            out_dir = ensure_dir(cfg["output"].get("reports_dir", "output/reports"))
+            fp = out_dir / "failed_codes.txt"
+            fp.write_text("\n".join(failed_codes), encoding="utf-8")
+            log.info("失败股票代码已写入: %s (%d 个)", fp, len(failed_codes))
+        except Exception as e:  # noqa
+            log.debug("写 failed_codes.txt 失败: %s", e)
 
     # ---- 过滤 ----
     min_score = int(filt.get("min_score", 0))

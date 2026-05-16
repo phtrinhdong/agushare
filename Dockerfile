@@ -29,7 +29,7 @@ RUN mkdir -p /app/cache /app/output/reports /app/output/charts /app/logs
 
 # 容器内健康检查
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD curl -fsS http://127.0.0.1:8000/api/scan/status >/dev/null \
+    CMD curl -fsS http://127.0.0.1:8000/healthz >/dev/null \
     || exit 1
 
 EXPOSE 8000

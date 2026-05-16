@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import random
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -71,6 +72,7 @@ def fetch_kline(
     cache_dir: str | Path = "cache",
     cache_ttl_hours: int = 6,
     retries: int = 2,
+    jitter_range: tuple[float, float] = (0.05, 0.20),
 ) -> pd.DataFrame | None:
     """
     拉取单只股票的日K线，返回 DataFrame:
@@ -98,6 +100,8 @@ def fetch_kline(
     last_err: Exception | None = None
     for attempt in range(retries + 1):
         try:
+            # 请求前抖动 sleep,避免突发并发把上游打挂
+            time.sleep(random.uniform(*jitter_range))
             df = ak.stock_zh_a_hist(
                 symbol=code,
                 period="daily",
@@ -128,7 +132,8 @@ def fetch_kline(
             return df.tail(bars)
         except Exception as e:  # noqa
             last_err = e
-            time.sleep(0.5 * (attempt + 1))
+            # 指数退避 + 抖动
+            time.sleep((0.5 * (2 ** attempt)) + random.uniform(0, 0.3))
 
     log.warning("拉取 %s K线失败: %s", code, last_err)
     return None

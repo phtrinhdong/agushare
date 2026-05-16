@@ -22,7 +22,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
@@ -119,10 +119,18 @@ _AUTH_PASS = os.environ.get("AGU_AUTH_PASS", "")
 _AUTH_ENABLED = bool(_AUTH_USER and _AUTH_PASS)
 _security = HTTPBasic(auto_error=False)
 
+# 不走认证的路径白名单 (健康检查等)
+_AUTH_WHITELIST = {"/healthz"}
 
-def require_auth(credentials: HTTPBasicCredentials | None = Depends(_security)):
+
+def require_auth(
+    request: Request,
+    credentials: HTTPBasicCredentials | None = Depends(_security),
+):
     if not _AUTH_ENABLED:
         return  # 未配置就完全不强制
+    if request.url.path in _AUTH_WHITELIST:
+        return  # 健康检查等放行
     if credentials is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -158,6 +166,12 @@ def _startup():
     log.info("Web 服务启动,已加载 %d 个形态 + %d 个指标 (auth=%s)",
              len(list_all()["patterns"]), len(list_all()["indicators"]),
              "ON" if _AUTH_ENABLED else "OFF")
+
+
+# 健康检查 — 不走 auth (Docker / Caddy / 负载均衡用)
+@app.get("/healthz", dependencies=[])
+def healthz():
+    return {"ok": True, "running": STATE.running}
 
 
 @app.get("/")

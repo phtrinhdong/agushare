@@ -39,7 +39,7 @@ services:
       # 用户自定义形态目录 (热挂载, 改完重启容器生效)
       - ./ashare_agent/patterns/custom:/app/ashare_agent/patterns/custom:ro
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/api/scan/status"]
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/healthz"]
       interval: 30s
       timeout: 5s
       retries: 3

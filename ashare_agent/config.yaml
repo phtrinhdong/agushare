@@ -95,6 +95,10 @@ schedule:
 
 # ---------- 并发 / 日志 ----------
 runtime:
-  max_workers: 8             # 并发线程数
+  # 并发线程数 — akshare 上游 (东方财富) 对突发并发敏感:
+  #   8  下偶有 RemoteDisconnected (~1-3% 失败)
+  #   3  几乎零失败,扫全市场 ~30-50 分钟
+  #   1  最稳定但慢,适合服务器带宽差/被严格限流时
+  max_workers: 3
   log_level: "INFO"
   log_file: "logs/agent.log"
