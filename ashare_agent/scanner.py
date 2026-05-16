@@ -23,9 +23,9 @@ class SignalRow:
     name: str
     close: float
     chg_pct: float            # 当日涨跌幅
-    chg_5d: float | None = None    # 5 个交易日 (≈1 周)
-    chg_10d: float | None = None   # 10 个交易日 (≈2 周)
-    chg_20d: float | None = None   # 20 个交易日 (≈1 月)
+    chg_5d: float | None = None    # 5 个交易日  (≈1 周)
+    chg_15d: float | None = None   # 15 个交易日 (≈3 周)
+    chg_30d: float | None = None   # 30 个交易日 (≈1.5 月)
     score: int = 0
     candlestick: list[str] = field(default_factory=list)
     indicators: list[str] = field(default_factory=list)
@@ -38,8 +38,8 @@ class SignalRow:
             "收盘价": round(self.close, 2),
             "涨跌幅%": round(self.chg_pct, 2),
             "5日%": _round(self.chg_5d),
-            "10日%": _round(self.chg_10d),
-            "20日%": _round(self.chg_20d),
+            "15日%": _round(self.chg_15d),
+            "30日%": _round(self.chg_30d),
             "综合得分": self.score,
             "K线形态": ",".join(self.candlestick),
             "技术指标": ",".join(self.indicators),
@@ -54,14 +54,14 @@ def _round(v):
 
 
 def _short_term_gains(df: pd.DataFrame) -> tuple[float | None, float | None, float | None]:
-    """返回 (5日, 10日, 20日) 涨跌幅 %,数据不足返回 None"""
+    """返回 (5日, 15日, 30日) 涨跌幅 %,数据不足返回 None"""
     closes = df["close"]
     cur = closes.iloc[-1]
     def chg(n: int):
         if len(closes) < n + 1: return None
         past = closes.iloc[-1 - n]
         return (cur - past) / past * 100 if past > 0 else None
-    return chg(5), chg(10), chg(20)
+    return chg(5), chg(15), chg(30)
 
 
 # ============================================================
@@ -88,13 +88,13 @@ def scan_one(
     last = df.iloc[-1]
     prev_close = df["close"].iloc[-2] if len(df) > 1 else last["close"]
     chg = (last["close"] - prev_close) / prev_close * 100 if prev_close else 0.0
-    chg5, chg10, chg20 = _short_term_gains(df)
+    chg5, chg15, chg30 = _short_term_gains(df)
 
     return SignalRow(
         code=code, name=name,
         close=float(last["close"]),
         chg_pct=float(chg),
-        chg_5d=chg5, chg_10d=chg10, chg_20d=chg20,
+        chg_5d=chg5, chg_15d=chg15, chg_30d=chg30,
         score=score,
         candlestick=[h["desc"] for h in candles],
         indicators=[h["desc"] for h in inds],

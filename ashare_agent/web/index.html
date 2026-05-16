@@ -149,7 +149,7 @@
   th.active { color: var(--accent); }
   th .arrow { margin-left: 4px; opacity: .7; }
   tbody tr:hover { background: rgba(79, 140, 255, 0.06); }
-  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; }
   td.up { color: var(--up); }
   td.down { color: var(--down); }
   td.code { font-family: ui-monospace, SF Mono, Menlo, monospace; }
@@ -458,8 +458,8 @@
         <th data-sort="close" class="num">收盘价</th>
         <th data-sort="chg_pct" class="num">涨跌%</th>
         <th data-sort="chg_5d" class="num">5日%</th>
-        <th data-sort="chg_10d" class="num">10日%</th>
-        <th data-sort="chg_20d" class="num">20日%</th>
+        <th data-sort="chg_15d" class="num">15日%</th>
+        <th data-sort="chg_30d" class="num">30日%</th>
         <th data-sort="score" class="num">得分</th>
         <th>K线形态</th>
         <th>技术指标</th>
@@ -687,8 +687,8 @@ function renderTable() {
       <td class="num">${fmt2(r.close)}</td>
       <td class="num ${chgCls}">${r.chg_pct > 0 ? "+" : ""}${fmt2(r.chg_pct)}</td>
       ${fmtChg(r.chg_5d)}
-      ${fmtChg(r.chg_10d)}
-      ${fmtChg(r.chg_20d)}
+      ${fmtChg(r.chg_15d)}
+      ${fmtChg(r.chg_30d)}
       <td class="score">${r.score}</td>
       <td>${candles || "—"}</td>
       <td>${inds || "—"}</td>
