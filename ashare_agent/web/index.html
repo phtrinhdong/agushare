@@ -107,6 +107,55 @@
     padding: 6px 10px; font-size: 13px; outline: none;
   }
   .toolbar input { width: 200px; }
+
+  /* 形态筛选 (自定义多选下拉) */
+  .pattern-filter { position: relative; }
+  .pattern-filter .trigger {
+    background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 12px; font-size: 13px; cursor: pointer;
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+  .pattern-filter .trigger .count {
+    background: var(--accent); color: #fff;
+    padding: 1px 7px; border-radius: 10px;
+    font-size: 11px; font-weight: 600;
+  }
+  .pattern-filter .trigger .caret { color: var(--muted); font-size: 10px; }
+  .pattern-filter .popup {
+    display: none; position: absolute; top: calc(100% + 4px); left: 0;
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 8px; min-width: 280px; max-width: 360px;
+    max-height: 420px; overflow-y: auto;
+    box-shadow: 0 8px 24px rgba(0,0,0,.4);
+    z-index: 20; padding: 8px 0;
+  }
+  .pattern-filter.open .popup { display: block; }
+  .pattern-filter .popup .actions {
+    display: flex; gap: 8px; padding: 0 12px 8px;
+    border-bottom: 1px solid var(--border); margin-bottom: 6px;
+  }
+  .pattern-filter .popup .actions button {
+    background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 4px;
+    padding: 3px 9px; font-size: 11px; cursor: pointer;
+  }
+  .pattern-filter .popup .actions button:hover { border-color: var(--accent); }
+  .pattern-filter .popup .group-title {
+    color: var(--muted); font-size: 11px;
+    text-transform: uppercase; letter-spacing: .05em;
+    padding: 6px 12px 4px;
+  }
+  .pattern-filter .popup label {
+    display: flex; align-items: center; gap: 8px;
+    padding: 5px 12px; cursor: pointer; font-size: 13px;
+  }
+  .pattern-filter .popup label:hover { background: var(--panel-2); }
+  .pattern-filter .popup label .src {
+    margin-left: auto; color: var(--muted); font-size: 10px;
+    font-family: ui-monospace, Menlo, monospace;
+  }
+  .pattern-filter .popup label .src.custom { color: var(--warn); }
   .toolbar button {
     background: var(--accent); color: #fff;
     border: none; border-radius: 6px;
@@ -413,17 +462,31 @@
   <div class="tab-pane active" id="tab-scan">
   <div class="toolbar">
     <input id="search" placeholder="搜索 代码/名称..." />
-    <select id="filterPattern">
-      <option value="">全部形态</option>
-    </select>
+    <div class="pattern-filter" id="patternFilter">
+      <button class="trigger" onclick="togglePatternFilter(event)">
+        <span id="patternFilterLabel">全部形态</span>
+        <span class="count" id="patternFilterCount" style="display:none">0</span>
+        <span class="caret">▼</span>
+      </button>
+      <div class="popup" id="patternPopup">
+        <div class="actions">
+          <button onclick="patternSelectAll()">全选</button>
+          <button onclick="patternClearAll()">清空</button>
+          <button onclick="patternOnlyCandlestick()">仅形态</button>
+          <button onclick="patternOnlyIndicator()">仅指标</button>
+        </div>
+        <div id="patternPopupBody">加载中…</div>
+      </div>
+    </div>
     <select id="filterMinScore">
       <option value="0">最低得分: 不限</option>
       <option value="3">≥ 3</option>
       <option value="5">≥ 5</option>
       <option value="8">≥ 8</option>
     </select>
-    <button id="btnScan">触发扫描</button>
-    <button id="btnScanWatchlist" class="secondary">扫描自选股</button>
+    <button id="btnScan">扫描全市场</button>
+    <button id="btnScanWatchlist" class="secondary">扫描特别关注</button>
+    <button id="btnStop" style="display:none;background:var(--up);color:#fff;border:none;border-radius:6px;padding:7px 14px;cursor:pointer">停止扫描</button>
     <button id="btnBacktest" class="secondary">回测</button>
     <button id="btnRefresh" class="secondary">刷新数据</button>
     <span class="status" id="status"><span class="dot"></span><span id="statusText">就绪</span></span>
@@ -576,22 +639,122 @@ let POLL_TIMER = null;
 let LIVE_MODE = false;            // 扫描中?
 let LIVE_PREV_CODES = new Set();  // 上次轮询时已存在的代码,用于高亮新命中
 let SELECTED = new Set();         // 选中的股票代码 (跨筛选/排序保留)
+let SELECTED_PATTERNS = new Set(); // 形态过滤多选 (按 desc 中文描述)
+let ALL_PATTERNS = { patterns: [], indicators: [] };  // 全部已注册形态(/api/patterns 缓存)
 
 const $ = (id) => document.getElementById(id);
 const fmt2 = (n) => (typeof n === "number" ? n.toFixed(2) : n);
 
-function refreshPatternFilter(rows) {
-  const patternSet = new Set();
+// 计算每个形态在当前结果中命中几只 (供 popup 显示)
+function patternHitCounts(rows) {
+  const counts = {};
   rows.forEach(r => {
-    (r.candlestick || []).forEach(x => patternSet.add(x));
-    (r.indicators || []).forEach(x => patternSet.add(x));
+    [...(r.candlestick || []), ...(r.indicators || [])].forEach(p => {
+      counts[p] = (counts[p] || 0) + 1;
+    });
   });
-  const sel = $("filterPattern");
-  const current = sel.value;
-  sel.innerHTML = '<option value="">全部形态</option>' +
-    [...patternSet].sort().map(p => `<option value="${p}">${p}</option>`).join("");
-  if (current && patternSet.has(current)) sel.value = current;
+  return counts;
 }
+
+function renderPatternPopup() {
+  const counts = patternHitCounts(DATA.results || []);
+  const renderItem = (p) => {
+    const c = counts[p.desc] || 0;
+    const checked = SELECTED_PATTERNS.has(p.desc) ? "checked" : "";
+    const srcCls = p.source === "custom" ? "src custom" : "src";
+    return `<label>
+      <input type="checkbox" data-desc="${p.desc}" ${checked}/>
+      <span style="flex:1">${p.desc}</span>
+      ${c > 0 ? `<span style="color:var(--accent);font-size:11px">${c}</span>` : ""}
+      <span class="${srcCls}">${p.source === "custom" ? "custom" : ""}</span>
+    </label>`;
+  };
+  const html =
+    `<div class="group-title">K 线形态 (${ALL_PATTERNS.patterns.length})</div>` +
+    ALL_PATTERNS.patterns.map(renderItem).join("") +
+    `<div class="group-title">技术指标 (${ALL_PATTERNS.indicators.length})</div>` +
+    ALL_PATTERNS.indicators.map(renderItem).join("");
+  $("patternPopupBody").innerHTML = html;
+}
+
+function refreshPatternFilter(rows) {
+  // 旧函数保留接口但不再依赖结果填充下拉 — popup 用注册中心的全集
+  renderPatternPopup();
+  updatePatternFilterLabel();
+}
+
+function updatePatternFilterLabel() {
+  const n = SELECTED_PATTERNS.size;
+  if (n === 0) {
+    $("patternFilterLabel").textContent = "全部形态";
+    $("patternFilterCount").style.display = "none";
+  } else if (n === 1) {
+    $("patternFilterLabel").textContent = [...SELECTED_PATTERNS][0];
+    $("patternFilterCount").style.display = "none";
+  } else {
+    $("patternFilterLabel").textContent = "已选";
+    $("patternFilterCount").textContent = n;
+    $("patternFilterCount").style.display = "inline-block";
+  }
+}
+
+function togglePatternFilter(e) {
+  e?.stopPropagation();
+  $("patternFilter").classList.toggle("open");
+}
+
+// 点击下拉外关闭
+document.addEventListener("click", (e) => {
+  if (!$("patternFilter").contains(e.target)) {
+    $("patternFilter").classList.remove("open");
+  }
+});
+
+// 复选框变化
+document.addEventListener("change", (e) => {
+  if (e.target.parentElement && e.target.parentElement.parentElement
+      && e.target.parentElement.parentElement.id === "patternPopupBody"
+      && e.target.matches('input[type="checkbox"][data-desc]')) {
+    const desc = e.target.dataset.desc;
+    if (e.target.checked) SELECTED_PATTERNS.add(desc);
+    else SELECTED_PATTERNS.delete(desc);
+    updatePatternFilterLabel();
+    renderTable();
+  }
+});
+
+function patternSelectAll() {
+  [...ALL_PATTERNS.patterns, ...ALL_PATTERNS.indicators].forEach(p => SELECTED_PATTERNS.add(p.desc));
+  renderPatternPopup();
+  updatePatternFilterLabel();
+  renderTable();
+}
+function patternClearAll() {
+  SELECTED_PATTERNS.clear();
+  renderPatternPopup();
+  updatePatternFilterLabel();
+  renderTable();
+}
+function patternOnlyCandlestick() {
+  SELECTED_PATTERNS.clear();
+  ALL_PATTERNS.patterns.forEach(p => SELECTED_PATTERNS.add(p.desc));
+  renderPatternPopup(); updatePatternFilterLabel(); renderTable();
+}
+function patternOnlyIndicator() {
+  SELECTED_PATTERNS.clear();
+  ALL_PATTERNS.indicators.forEach(p => SELECTED_PATTERNS.add(p.desc));
+  renderPatternPopup(); updatePatternFilterLabel(); renderTable();
+}
+
+// 启动时拉一次全部形态
+async function loadAllPatterns() {
+  try {
+    const r = await fetch("/api/patterns");
+    ALL_PATTERNS = await r.json();
+    renderPatternPopup();
+  } catch (e) { /* ignore */ }
+}
+loadAllPatterns();
 
 async function loadSignals() {
   const r = await fetch("/api/signals");
@@ -634,16 +797,17 @@ function applyLiveStatus(s) {
 
 function renderTable() {
   const kw = $("search").value.trim().toLowerCase();
-  const pat = $("filterPattern").value;
   const minScore = parseInt($("filterMinScore").value, 10);
   let rows = (DATA.results || []).filter(r => {
     if (minScore && r.score < minScore) return false;
     if (kw) {
       if (!r.code.includes(kw) && !(r.name || "").toLowerCase().includes(kw)) return false;
     }
-    if (pat) {
-      const all = [...(r.candlestick||[]), ...(r.indicators||[])];
-      if (!all.includes(pat)) return false;
+    if (SELECTED_PATTERNS.size > 0) {
+      const all = new Set([...(r.candlestick||[]), ...(r.indicators||[])]);
+      // OR 逻辑: 至少匹配一个选中的形态
+      const hit = [...SELECTED_PATTERNS].some(p => all.has(p));
+      if (!hit) return false;
     }
     return true;
   });
@@ -725,33 +889,50 @@ document.querySelectorAll("th[data-sort]").forEach(th => {
   });
 });
 
-["search", "filterPattern", "filterMinScore"].forEach(id => {
+["search", "filterMinScore"].forEach(id => {
   $(id).addEventListener("input", renderTable);
 });
 
 // ---- 扫描 ----
+function setScanButtonsRunning(running) {
+  $("btnScan").disabled = running;
+  $("btnScanWatchlist").disabled = running;
+  $("btnStop").style.display = running ? "inline-block" : "none";
+  $("btnStop").disabled = false;
+}
+
 async function triggerScan(watchlistOnly) {
-  $("btnScan").disabled = true;
-  $("btnScanWatchlist").disabled = true;
+  setScanButtonsRunning(true);
   try {
     const r = await fetch("/api/scan?watchlist_only=" + (watchlistOnly ? "true" : "false"),
                          { method: "POST" });
     const data = await r.json();
     if (!r.ok) {
       alert(data.detail || "启动扫描失败");
-      $("btnScan").disabled = false;
-      $("btnScanWatchlist").disabled = false;
+      setScanButtonsRunning(false);
       return;
     }
     startPolling();
   } catch (e) {
     alert("扫描请求失败: " + e);
-    $("btnScan").disabled = false;
-    $("btnScanWatchlist").disabled = false;
+    setScanButtonsRunning(false);
   }
 }
+
+async function stopScan() {
+  if (!confirm("确定停止当前扫描吗？\n已扫到的命中股票会被保留。")) return;
+  $("btnStop").disabled = true;
+  $("btnStop").textContent = "停止中...";
+  try {
+    const r = await fetch("/api/scan/stop", { method: "POST" });
+    const d = await r.json();
+    if (!r.ok) alert(d.detail || "停止失败");
+  } catch (e) { alert("停止失败: " + e); }
+}
+
 $("btnScan").addEventListener("click", () => triggerScan(false));
 $("btnScanWatchlist").addEventListener("click", () => triggerScan(true));
+$("btnStop").addEventListener("click", stopScan);
 $("btnRefresh").addEventListener("click", loadSignals);
 
 function startPolling() {
@@ -770,12 +951,17 @@ function startPolling() {
       // 扫描中：用 status 里的 results 刷表(边扫边显示)
       if (s.running) {
         applyLiveStatus(s);
+        // 已发停止请求 → 停止按钮显示等待状态
+        if (s.stop_requested) {
+          $("btnStop").disabled = true;
+          $("btnStop").textContent = "停止中...";
+        }
       } else {
         clearInterval(POLL_TIMER);
         POLL_TIMER = null;
         LIVE_MODE = false;
-        $("btnScan").disabled = false;
-        $("btnScanWatchlist").disabled = false;
+        setScanButtonsRunning(false);
+        $("btnStop").textContent = "停止扫描";   // 复位文案
         // 扫完隐藏进度条,从 /api/signals 拉最终结果(已落盘的)
         $("progress").classList.remove("show");
         if (!s.error) {
@@ -1274,8 +1460,7 @@ loadSignals();
 // 启动时也轮询一次，以防进入页面时正好有扫描在跑
 fetch("/api/scan/status").then(r => r.json()).then(s => {
   if (s.running) {
-    $("btnScan").disabled = true;
-    $("btnScanWatchlist").disabled = true;
+    setScanButtonsRunning(true);
     startPolling();
   }
 });
