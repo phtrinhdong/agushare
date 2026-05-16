@@ -33,7 +33,67 @@
   header h1 { margin: 0; font-size: 18px; font-weight: 600; }
   header .meta { color: var(--muted); font-size: 13px; }
 
-  main { padding: 18px 24px 60px; }
+  main { padding: 0 24px 60px; }
+
+  /* Tab 导航 */
+  .tabs {
+    display: flex; gap: 4px; padding: 14px 0 0;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 18px;
+    position: sticky; top: 50px; background: var(--bg); z-index: 5;
+  }
+  .tab {
+    padding: 9px 18px; background: transparent;
+    color: var(--muted); border: none; cursor: pointer;
+    font-size: 14px; font-weight: 500;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+    transition: color .15s, border-color .15s;
+  }
+  .tab:hover { color: var(--text); }
+  .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .tab .tab-badge {
+    margin-left: 6px;
+    background: var(--accent); color: #fff;
+    padding: 1px 7px; border-radius: 10px;
+    font-size: 11px; font-weight: 600;
+  }
+  .tab .live-dot {
+    display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+    background: var(--down); margin-left: 6px; vertical-align: middle;
+    animation: pulse-dot 1.2s infinite;
+  }
+  @keyframes pulse-dot { 50% { opacity: .35; } }
+
+  .tab-pane { display: none; }
+  .tab-pane.active { display: block; }
+
+  /* 自动刷新开关 */
+  .refresh-ctrl {
+    display: inline-flex; align-items: center; gap: 8px;
+    margin-left: auto;
+  }
+  .refresh-btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 6px 14px; border-radius: 6px; cursor: pointer;
+    font-size: 13px; border: 1px solid var(--border);
+    background: var(--panel-2); color: var(--text);
+    transition: all .15s;
+  }
+  .refresh-btn.on {
+    background: rgba(44, 182, 125, 0.12); color: var(--down);
+    border-color: rgba(44, 182, 125, 0.5);
+  }
+  .refresh-btn.off {
+    background: rgba(140, 147, 160, 0.08); color: var(--muted);
+  }
+  .refresh-btn:hover { opacity: .85; }
+  .refresh-btn .icon { font-size: 14px; }
+  .countdown {
+    color: var(--muted); font-size: 12px;
+    font-variant-numeric: tabular-nums;
+    min-width: 90px;
+  }
 
   .toolbar {
     display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
@@ -340,6 +400,17 @@
 </header>
 
 <main>
+  <div class="tabs">
+    <button class="tab active" data-tab="scan">扫描结果</button>
+    <button class="tab" data-tab="watchlist">
+      特别关注
+      <span class="tab-badge" id="wlBadge" style="display:none">0</span>
+      <span class="live-dot" id="wlLiveDot" style="display:none" title="自动刷新中"></span>
+    </button>
+  </div>
+
+  <!-- ========== Tab: 扫描 ========== -->
+  <div class="tab-pane active" id="tab-scan">
   <div class="toolbar">
     <input id="search" placeholder="搜索 代码/名称..." />
     <select id="filterPattern">
@@ -354,7 +425,6 @@
     <button id="btnScan">触发扫描</button>
     <button id="btnScanWatchlist" class="secondary">扫描自选股</button>
     <button id="btnBacktest" class="secondary">回测</button>
-    <button id="btnWatchlist" class="secondary">特别关注 <span id="wlBadge" style="display:none;background:var(--accent);color:#fff;padding:0 6px;border-radius:8px;font-size:11px;margin-left:4px"></span></button>
     <button id="btnRefresh" class="secondary">刷新数据</button>
     <span class="status" id="status"><span class="dot"></span><span id="statusText">就绪</span></span>
   </div>
@@ -379,7 +449,7 @@
     <button class="secondary" onclick="clearSelection()">清空</button>
   </div>
 
-  <table id="tbl">
+  <table id="tbl" style="margin-top:14px">
     <thead>
       <tr>
         <th class="check-col"><input type="checkbox" id="selAll" /></th>
@@ -399,6 +469,39 @@
     <tbody id="tbody"></tbody>
   </table>
   <div id="empty" class="empty" style="display:none">暂无扫描结果。点击右上"触发扫描"开始。</div>
+  </div><!-- /tab-scan -->
+
+  <!-- ========== Tab: 特别关注 ========== -->
+  <div class="tab-pane" id="tab-watchlist">
+    <div class="wl-toolbar">
+      <input id="wlAddCode" class="code" placeholder="代码 600519" maxlength="6"/>
+      <input id="wlAddCost" class="num" placeholder="成本价 (可选)" step="0.01" type="number"/>
+      <input id="wlAddQty"  class="num" placeholder="数量 (可选)" type="number"/>
+      <button onclick="addWatchlist()">添加</button>
+
+      <span id="wlTradingBadge" class="badge closed">非交易时段</span>
+
+      <div class="refresh-ctrl">
+        <button id="wlAutoBtn" class="refresh-btn off" onclick="toggleAutoRefresh()">
+          <span class="icon">▶</span><span id="wlAutoLabel">开启自动刷新</span>
+        </button>
+        <span class="countdown" id="wlCountdown">—</span>
+        <button class="refresh-btn" onclick="refreshWatchlist(true)" title="立即刷新一次">
+          <span class="icon">↻</span>
+        </button>
+      </div>
+    </div>
+
+    <div id="wlTableContainer">
+      <div class="wl-empty">加载中…</div>
+    </div>
+
+    <div style="margin-top:12px;color:var(--muted);font-size:12px;line-height:1.6">
+      <b>提示：</b>
+      自动刷新每 10 秒拉一次行情，仅在交易时段 (9:25-11:30 / 13:00-15:05) 真正请求；
+      切到其他 tab 会自动暂停轮询。在「扫描结果」表里点 <b style="color:var(--accent)">★</b> 可快速加入此列表。
+    </div>
+  </div><!-- /tab-watchlist -->
 </main>
 
 <div class="modal" id="modal" onclick="closeModal(event)">
@@ -408,28 +511,6 @@
     <div class="body" id="modalBody">
       <div class="spinner"></div>
       <div class="hint" id="modalHint">正在拉取数据并生成 K 线图，首次生成约 3-5 秒…</div>
-    </div>
-  </div>
-</div>
-
-<!-- 特别关注模态框 -->
-<div class="modal" id="wlModal" onclick="closeWlModal(event)">
-  <div class="inner wl-modal" onclick="event.stopPropagation()">
-    <button class="close" onclick="closeWlModal()">×</button>
-    <h3>特别关注 <span id="wlStatus" style="font-size:12px;color:var(--muted);font-weight:normal"></span></h3>
-
-    <div class="wl-toolbar">
-      <input id="wlAddCode" class="code" placeholder="代码 600519" maxlength="6"/>
-      <input id="wlAddCost" class="num" placeholder="成本价 (可选)" step="0.01" type="number"/>
-      <input id="wlAddQty"  class="num" placeholder="数量 (可选)" type="number"/>
-      <button onclick="addWatchlist()">添加</button>
-      <span id="wlTradingBadge" class="badge closed">非交易时段</span>
-      <button class="secondary" onclick="refreshWatchlist(true)"
-              style="background:var(--panel-2);color:var(--text);border:1px solid var(--border)">手动刷新</button>
-    </div>
-
-    <div id="wlTableContainer">
-      <div class="wl-empty">加载中…</div>
     </div>
   </div>
 </div>
@@ -968,23 +1049,94 @@ function renderBtDone(s) {
 $("btnBacktest").addEventListener("click", openBtModal);
 
 // ============================================================
-// 特别关注 (Watchlist)
+// Tab 切换
 // ============================================================
-let WL_TIMER = null;
-let WL_PREV_PRICES = {};   // code -> price,用于价格变动 flash
+function switchTab(name) {
+  document.querySelectorAll(".tab").forEach(t => {
+    t.classList.toggle("active", t.dataset.tab === name);
+  });
+  document.querySelectorAll(".tab-pane").forEach(p => {
+    p.classList.toggle("active", p.id === "tab-" + name);
+  });
 
-async function openWlModal() {
-  $("wlModal").classList.add("show");
-  await refreshWatchlist(true);
-  // 启动 10 秒轮询 (仅交易时段)
-  if (WL_TIMER) clearInterval(WL_TIMER);
-  WL_TIMER = setInterval(() => refreshWatchlist(false), 10000);
+  if (name === "watchlist") {
+    refreshWatchlist(true);
+    if (WL_AUTO_REFRESH) startAutoRefresh();
+  } else {
+    stopAutoRefresh();   // 离开关注 tab 暂停轮询
+  }
 }
 
-function closeWlModal(e) {
-  if (e && e.target.id !== "wlModal" && e.type === "click") return;
-  $("wlModal").classList.remove("show");
+document.querySelectorAll(".tab").forEach(t => {
+  t.addEventListener("click", () => switchTab(t.dataset.tab));
+});
+
+// ============================================================
+// 特别关注 (Watchlist) + 自动刷新状态机
+// ============================================================
+const WL_REFRESH_INTERVAL = 10;    // 秒
+let WL_TIMER = null;
+let WL_COUNTDOWN_TIMER = null;
+let WL_NEXT_AT = 0;                // unix ms
+let WL_AUTO_REFRESH = (localStorage.getItem("wlAuto") || "true") === "true";
+let WL_PREV_PRICES = {};           // code -> price,用于价格变动 flash
+
+function updateAutoBtnUI() {
+  const btn = $("wlAutoBtn");
+  if (WL_AUTO_REFRESH) {
+    btn.classList.remove("off"); btn.classList.add("on");
+    btn.querySelector(".icon").textContent = "⏸";
+    $("wlAutoLabel").textContent = `暂停 (10s 自动)`;
+  } else {
+    btn.classList.remove("on"); btn.classList.add("off");
+    btn.querySelector(".icon").textContent = "▶";
+    $("wlAutoLabel").textContent = "开启自动刷新";
+    $("wlCountdown").textContent = "已暂停";
+    $("wlLiveDot").style.display = "none";
+  }
+}
+
+function startAutoRefresh() {
+  stopAutoRefresh();
+  if (!WL_AUTO_REFRESH) return;
+  WL_NEXT_AT = Date.now() + WL_REFRESH_INTERVAL * 1000;
+  WL_TIMER = setInterval(async () => {
+    await refreshWatchlist(false);
+    WL_NEXT_AT = Date.now() + WL_REFRESH_INTERVAL * 1000;
+  }, WL_REFRESH_INTERVAL * 1000);
+  // 倒计时显示 (1Hz)
+  if (WL_COUNTDOWN_TIMER) clearInterval(WL_COUNTDOWN_TIMER);
+  WL_COUNTDOWN_TIMER = setInterval(updateCountdown, 1000);
+  updateCountdown();
+}
+
+function stopAutoRefresh() {
   if (WL_TIMER) { clearInterval(WL_TIMER); WL_TIMER = null; }
+  if (WL_COUNTDOWN_TIMER) { clearInterval(WL_COUNTDOWN_TIMER); WL_COUNTDOWN_TIMER = null; }
+  $("wlLiveDot").style.display = "none";
+}
+
+function updateCountdown() {
+  if (!WL_AUTO_REFRESH || !WL_TIMER) {
+    $("wlCountdown").textContent = WL_AUTO_REFRESH ? "—" : "已暂停";
+    return;
+  }
+  const remain = Math.max(0, Math.round((WL_NEXT_AT - Date.now()) / 1000));
+  $("wlCountdown").textContent = remain > 0
+    ? `${remain}s 后刷新`
+    : "刷新中...";
+}
+
+function toggleAutoRefresh() {
+  WL_AUTO_REFRESH = !WL_AUTO_REFRESH;
+  localStorage.setItem("wlAuto", WL_AUTO_REFRESH ? "true" : "false");
+  updateAutoBtnUI();
+  if (WL_AUTO_REFRESH) {
+    // 立即刷一次,再启动轮询
+    refreshWatchlist(true).then(() => startAutoRefresh());
+  } else {
+    stopAutoRefresh();
+  }
 }
 
 async function refreshWatchlist(force) {
@@ -1002,12 +1154,14 @@ function renderWatchlist(data) {
   const items = data.items || [];
   const inTrading = data.trading_hours;
 
-  // 顶部 badge + 徽章计数
-  $("wlTradingBadge").textContent = inTrading ? "交易中 · 10s 自动刷新" : "非交易时段";
+  $("wlTradingBadge").textContent = inTrading ? "交易中" : "非交易时段";
   $("wlTradingBadge").className = "badge" + (inTrading ? "" : " closed");
-  $("wlStatus").textContent = "(" + items.length + " 只)";
   $("wlBadge").textContent = items.length;
   $("wlBadge").style.display = items.length > 0 ? "inline-block" : "none";
+
+  // tab 上的 live dot: 自动刷新 + 交易时段 才亮
+  $("wlLiveDot").style.display =
+    (WL_AUTO_REFRESH && inTrading && items.length > 0) ? "inline-block" : "none";
 
   if (items.length === 0) {
     $("wlTableContainer").innerHTML =
@@ -1094,38 +1248,20 @@ async function removeWatchlist(code) {
   await refreshWatchlist(true);
 }
 
-// 扫描表 ★ 一键添加
-async function quickAddWatchlist(code, name) {
-  const cost = prompt(`添加 ${code} ${name} 到关注列表\n\n成本价 (可留空,直接确定):`, "");
-  const qty = cost ? prompt("持仓数量 (可留空):", "") : "";
-  try {
-    const r = await fetch("/api/watchlist", {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({
-        code, name,
-        cost_price: cost ? parseFloat(cost) : null,
-        quantity: qty ? parseFloat(qty) : null,
-      }),
-    });
-    if (!r.ok) {
-      const d = await r.json();
-      throw new Error(d.detail || `HTTP ${r.status}`);
-    }
-    // 更新 badge
-    const wl = await fetch("/api/watchlist").then(r=>r.json());
-    $("wlBadge").textContent = wl.items.length;
-    $("wlBadge").style.display = "inline-block";
-    // 闪一下按钮表示成功
-    const btn = $("btnWatchlist");
-    btn.style.background = "var(--down)";
-    setTimeout(() => btn.style.background = "", 800);
-  } catch (e) { alert("添加失败: " + e.message); }
+// 扫描表 ★ 一键添加: 切到关注 tab + 自动填代码,用户在表单里继续填成本价
+function quickAddWatchlist(code, name) {
+  switchTab("watchlist");
+  $("wlAddCode").value = code;
+  $("wlAddCost").focus();
+  // 视觉提示
+  ["wlAddCode","wlAddCost","wlAddQty"].forEach(id => {
+    $(id).style.borderColor = "var(--accent)";
+    setTimeout(() => $(id).style.borderColor = "", 1500);
+  });
 }
 
-$("btnWatchlist").addEventListener("click", openWlModal);
-
-// 启动时刷一下关注数量到 badge
+// 启动时:刷新 badge + 初始化自动刷新按钮 UI
+updateAutoBtnUI();
 fetch("/api/watchlist").then(r=>r.json()).then(d=>{
   if (d.count > 0) {
     $("wlBadge").textContent = d.count;
