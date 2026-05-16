@@ -1,0 +1,28 @@
+# 减少构建上下文,加快 docker build
+.git/
+.gitignore
+.idea/
+.vscode/
+__pycache__/
+**/__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+.env.local
+
+# 运行时数据 (会通过 volume 挂载,不应被打包进镜像)
+ashare_agent/cache/
+ashare_agent/output/
+ashare_agent/logs/
+cache/
+output/
+logs/
+data/
+
+# 文档与图片 (不需要进镜像)
+*.pdf
+*.png
+README.md
+DEPLOY.md
+deploy/

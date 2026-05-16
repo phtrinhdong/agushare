@@ -44,6 +44,9 @@ logs/
 .env
 .env.local
 
+# ---------- Docker 运行时持久化数据 ----------
+data/
+
 # ---------- 测试 / 覆盖率 ----------
 .pytest_cache/
 .coverage

@@ -15,13 +15,16 @@ FastAPI Web 后端
 from __future__ import annotations
 
 import logging
+import os
+import secrets
 import threading
 import time
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.responses import FileResponse, JSONResponse
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 
 from . import reporter, storage, visualizer
@@ -109,9 +112,38 @@ def _run_scan_background(cfg: dict):
 
 
 # ============================================================
+# 可选 HTTP Basic Auth (公网部署强烈建议开启)
+# ============================================================
+_AUTH_USER = os.environ.get("AGU_AUTH_USER", "")
+_AUTH_PASS = os.environ.get("AGU_AUTH_PASS", "")
+_AUTH_ENABLED = bool(_AUTH_USER and _AUTH_PASS)
+_security = HTTPBasic(auto_error=False)
+
+
+def require_auth(credentials: HTTPBasicCredentials | None = Depends(_security)):
+    if not _AUTH_ENABLED:
+        return  # 未配置就完全不强制
+    if credentials is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="缺少认证",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+    ok_user = secrets.compare_digest(credentials.username, _AUTH_USER)
+    ok_pass = secrets.compare_digest(credentials.password, _AUTH_PASS)
+    if not (ok_user and ok_pass):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="用户名或密码错误",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+
+
+# ============================================================
 # FastAPI App
 # ============================================================
-app = FastAPI(title="A股形态扫描 Agent", version="0.2.0")
+app = FastAPI(title="A股形态扫描 Agent", version="0.2.0",
+              dependencies=[Depends(require_auth)])
 
 _CFG: dict[str, Any] = {}
 _WEB_DIR = Path(__file__).parent / "web"
@@ -123,8 +155,9 @@ def _startup():
     _CFG = load_config()
     setup_logger(_CFG.get("runtime", {}).get("log_level", "INFO"),
                  _CFG.get("runtime", {}).get("log_file"))
-    log.info("Web 服务启动,已加载 %d 个形态 + %d 个指标",
-             len(list_all()["patterns"]), len(list_all()["indicators"]))
+    log.info("Web 服务启动,已加载 %d 个形态 + %d 个指标 (auth=%s)",
+             len(list_all()["patterns"]), len(list_all()["indicators"]),
+             "ON" if _AUTH_ENABLED else "OFF")
 
 
 @app.get("/")

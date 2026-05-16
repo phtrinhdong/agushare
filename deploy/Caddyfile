@@ -1,0 +1,26 @@
+# =========================================================
+# Caddy 反向代理 + 自动 HTTPS (Let's Encrypt)
+# 用法: 把这个文件挂载到 caddy 容器的 /etc/caddy/Caddyfile
+# 适合: 有域名,想一键 HTTPS,不想折腾 Nginx + certbot
+#
+# 把下面的 your-domain.com 改成你自己的域名,确保 DNS A 记录已指向服务器,
+# 然后在 docker-compose 中追加 caddy 服务并 80/443 端口即可。
+# =========================================================
+
+your-domain.com {
+    # 反向代理到 web 容器 (compose 内部 DNS)
+    reverse_proxy web:8000
+
+    # 简单的访问日志
+    log {
+        output stdout
+        format console
+    }
+
+    # 安全相关 header
+    header {
+        Strict-Transport-Security "max-age=31536000;"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "no-referrer-when-downgrade"
+    }
+}

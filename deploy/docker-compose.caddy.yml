@@ -1,0 +1,33 @@
+# =========================================================
+# 可选: 在主 docker-compose.yml 之上叠加 Caddy 反向代理
+# 用法:
+#   docker compose -f docker-compose.yml -f deploy/docker-compose.caddy.yml up -d
+#
+# 之后通过域名访问,Caddy 会自动申请并续期 Let's Encrypt 证书。
+# 注意:
+#   1. 关闭 docker-compose.yml 里 web 的 ports 暴露 (改用 expose 即可)
+#   2. 把 deploy/Caddyfile 里的 your-domain.com 改成真实域名
+# =========================================================
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    container_name: agushare-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - web
+
+  # 让 web 容器不再直接暴露端口,只在 docker 内部网络可达
+  web:
+    ports: !reset []
+
+volumes:
+  caddy_data:
+  caddy_config:

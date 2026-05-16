@@ -1,0 +1,73 @@
+# =========================================================
+# agushare — 生产部署
+#   - web:        FastAPI Web 看板 (端口 8000)
+#   - scheduler:  APScheduler 常驻进程,交易日 15:35 自动扫描
+# =========================================================
+#
+# 首次启动:
+#   cp .env.example .env  &&  vi .env       # 填用户名密码 (可选)
+#   docker compose up -d --build
+#
+# 升级代码:
+#   git pull && docker compose up -d --build
+#
+# 查看日志:
+#   docker compose logs -f web
+#   docker compose logs -f scheduler
+# =========================================================
+
+services:
+  web:
+    build: .
+    image: agushare:latest
+    container_name: agushare-web
+    restart: unless-stopped
+    ports:
+      - "${HOST_PORT:-8000}:8000"
+    environment:
+      TZ: Asia/Shanghai
+      # 可选: 开启 HTTP Basic Auth (在 .env 里设置)
+      AGU_AUTH_USER: "${AGU_AUTH_USER:-}"
+      AGU_AUTH_PASS: "${AGU_AUTH_PASS:-}"
+    volumes:
+      # 配置文件 (改完不用 rebuild,重启容器即可)
+      - ./ashare_agent/config.yaml:/app/ashare_agent/config.yaml:ro
+      # 数据持久化
+      - ./data/cache:/app/cache
+      - ./data/output:/app/output
+      - ./data/logs:/app/logs
+      # 用户自定义形态目录 (热挂载, 改完重启容器生效)
+      - ./ashare_agent/patterns/custom:/app/ashare_agent/patterns/custom:ro
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/api/scan/status"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  scheduler:
+    build: .
+    image: agushare:latest
+    container_name: agushare-scheduler
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+    volumes:
+      - ./ashare_agent/config.yaml:/app/ashare_agent/config.yaml:ro
+      - ./data/cache:/app/cache
+      - ./data/output:/app/output
+      - ./data/logs:/app/logs
+      - ./ashare_agent/patterns/custom:/app/ashare_agent/patterns/custom:ro
+    command:
+      - python
+      - -m
+      - ashare_agent.main
+      - schedule
+    depends_on:
+      - web
+
+# 数据卷说明:
+#   data/cache         akshare 拉到的日K parquet,加速重复扫描
+#   data/output/reports  每日 Excel + JSON 快照
+#   data/output/charts   每日 K线图 PNG
+#   data/logs            agent.log
