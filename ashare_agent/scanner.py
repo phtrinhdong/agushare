@@ -118,6 +118,9 @@ def scan_market(
             names = {}
     log.info("准备扫描 %d 只股票", len(codes))
 
+    # 每次扫描重置统计 (尤其 EM 熔断状态)
+    data_loader.reset_stats()
+
     bars = int(data_cfg.get("bars", 120))
     adjust = data_cfg.get("adjust", "qfq")
     cache_dir = data_cfg.get("cache_dir", "cache")

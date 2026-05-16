@@ -66,7 +66,15 @@ def _is_cache_fresh(path: Path, ttl_hours: int) -> bool:
 
 
 # 模块级统计 (供日志/诊断使用,线程安全要求不严)
-_STATS = {"ok_em": 0, "ok_sina": 0, "fail": 0, "logged_first": False}
+_STATS = {
+    "ok_em": 0, "ok_sina": 0, "fail": 0,
+    "em_consec_fail": 0,   # EM 连续失败计数
+    "em_disabled": False,  # EM 熔断标志
+    "logged_first": False,
+}
+
+# EM 连续失败这么多次就跳过 (避免每只股票都浪费 3.5 秒重试)
+_EM_FAILURE_THRESHOLD = 5
 
 
 def _normalize_em(df: pd.DataFrame, bars: int) -> pd.DataFrame:
@@ -105,9 +113,12 @@ def _fetch_em(code: str, start_date: str, end_date: str, adjust: str) -> pd.Data
     )
 
 
-def _fetch_sina(code: str, adjust: str) -> pd.DataFrame:
+def _fetch_sina(code: str, adjust: str,
+                start_date: str | None = None,
+                end_date: str | None = None) -> pd.DataFrame:
     """新浪源 — 用于东方财富不可达时回退。
     sina 代码格式: sh600000 / sz000001 / bj430047
+    start_date/end_date 格式: YYYYMMDD,可省略(取全部历史)
     """
     if code.startswith("6"):
         sym = "sh" + code
@@ -117,7 +128,12 @@ def _fetch_sina(code: str, adjust: str) -> pd.DataFrame:
         sym = "bj" + code
     else:
         sym = "sh" + code
-    return ak.stock_zh_a_daily(symbol=sym, adjust=adjust or "")
+    kw = {"symbol": sym, "adjust": adjust or ""}
+    if start_date:
+        kw["start_date"] = start_date
+    if end_date:
+        kw["end_date"] = end_date
+    return ak.stock_zh_a_daily(**kw)
 
 
 def fetch_kline(
@@ -152,31 +168,44 @@ def fetch_kline(
     em_err: Exception | None = None
     sina_err: Exception | None = None
 
-    # ---------- 1. 东方财富 (主) ----------
-    for attempt in range(retries + 1):
-        try:
-            time.sleep(random.uniform(*jitter_range))
-            df_raw = _fetch_em(code, start_date, end_date, adjust)
-            if df_raw is None or df_raw.empty:
-                return None
-            df = _normalize_em(df_raw, bars)
-            _save_cache(df, cache_path)
-            _STATS["ok_em"] += 1
-            _log_first_success(code, "eastmoney", df)
-            return df
-        except Exception as e:  # noqa
-            em_err = e
-            time.sleep((0.5 * (2 ** attempt)) + random.uniform(0, 0.3))
+    # ---------- 1. 东方财富 (主, 已熔断则跳过) ----------
+    if not _STATS["em_disabled"]:
+        for attempt in range(retries + 1):
+            try:
+                time.sleep(random.uniform(*jitter_range))
+                df_raw = _fetch_em(code, start_date, end_date, adjust)
+                if df_raw is None or df_raw.empty:
+                    # 空数据不算上游故障,直接返回
+                    _STATS["em_consec_fail"] = 0
+                    return None
+                df = _normalize_em(df_raw, bars)
+                _save_cache(df, cache_path)
+                _STATS["ok_em"] += 1
+                _STATS["em_consec_fail"] = 0
+                _log_first_success(code, "eastmoney", df)
+                return df
+            except Exception as e:  # noqa
+                em_err = e
+                time.sleep((0.5 * (2 ** attempt)) + random.uniform(0, 0.3))
+
+        # 全部 retry 失败 → 计入熔断计数
+        _STATS["em_consec_fail"] += 1
+        if (_STATS["em_consec_fail"] >= _EM_FAILURE_THRESHOLD
+                and not _STATS["em_disabled"]):
+            _STATS["em_disabled"] = True
+            log.warning("⚡ 东方财富连续失败 %d 次,本次扫描已熔断,后续仅用新浪",
+                        _EM_FAILURE_THRESHOLD)
 
     # ---------- 2. 新浪 (备) ----------
     try:
         time.sleep(random.uniform(0.1, 0.3))
-        df_raw = _fetch_sina(code, adjust)
+        df_raw = _fetch_sina(code, adjust,
+                             start_date=start_date, end_date=end_date)
         if df_raw is not None and not df_raw.empty:
             df = _normalize_sina(df_raw, bars)
             _save_cache(df, cache_path)
             _STATS["ok_sina"] += 1
-            _log_first_success(code, "sina (fallback)", df)
+            _log_first_success(code, "sina", df)
             return df
     except Exception as e:
         sina_err = e
@@ -217,6 +246,8 @@ def reset_stats():
     _STATS["ok_em"] = 0
     _STATS["ok_sina"] = 0
     _STATS["fail"] = 0
+    _STATS["em_consec_fail"] = 0
+    _STATS["em_disabled"] = False
     _STATS["logged_first"] = False
 
 
