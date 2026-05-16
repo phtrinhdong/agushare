@@ -203,7 +203,7 @@
   td.down { color: var(--down); }
   td.code { font-family: ui-monospace, SF Mono, Menlo, monospace; }
   td.score {
-    text-align: center;
+    text-align: right;
     font-weight: 600;
   }
   .badge {
@@ -822,7 +822,28 @@ function renderTable() {
   const tbody = $("tbody");
   if (!rows.length) {
     tbody.innerHTML = "";
-    $("empty").style.display = "";
+    const emptyEl = $("empty");
+    if (LIVE_MODE) {
+      emptyEl.innerHTML =
+        '<div class="spinner" style="width:28px;height:28px;border-width:3px;margin:0 auto 12px"></div>' +
+        '<div>扫描中，等待信号出现…</div>' +
+        '<div style="font-size:12px;margin-top:6px;color:var(--muted)">' +
+          '通常 50-200 只股票里出 1 个命中,所以前几分钟可能为空属正常' +
+        '</div>';
+    } else {
+      // 有筛选条件 vs 完全没数据
+      const totalRaw = (DATA.results || []).length;
+      if (totalRaw > 0) {
+        emptyEl.innerHTML =
+          '<div>当前筛选条件下没有匹配的股票</div>' +
+          '<div style="font-size:12px;margin-top:6px;color:var(--muted)">' +
+            `共 ${totalRaw} 只命中,试试清空筛选或降低最低得分` +
+          '</div>';
+      } else {
+        emptyEl.innerHTML = '暂无扫描结果。点击右上"扫描全市场"开始。';
+      }
+    }
+    emptyEl.style.display = "";
     $("cardVisible").textContent = 0;
     return;
   }
@@ -903,6 +924,17 @@ function setScanButtonsRunning(running) {
 
 async function triggerScan(watchlistOnly) {
   setScanButtonsRunning(true);
+  // 立刻清屏 + 显示扫描中占位,避免"旧表 → 空 → 慢慢填"的跳变
+  DATA = { results: [], scanned_at: null };
+  LIVE_MODE = true;
+  LIVE_PREV_CODES = new Set();
+  applyLiveStatus({
+    running: true,
+    message: "扫描启动中...",
+    progress: { total: 0, scanned: 0, ok: 0, fail: 0, hit: 0 },
+    results: [],
+  });
+
   try {
     const r = await fetch("/api/scan?watchlist_only=" + (watchlistOnly ? "true" : "false"),
                          { method: "POST" });
@@ -910,12 +942,18 @@ async function triggerScan(watchlistOnly) {
     if (!r.ok) {
       alert(data.detail || "启动扫描失败");
       setScanButtonsRunning(false);
+      LIVE_MODE = false;
+      $("progress").classList.remove("show");
+      await loadSignals();    // 失败回滚到上次结果
       return;
     }
     startPolling();
   } catch (e) {
     alert("扫描请求失败: " + e);
     setScanButtonsRunning(false);
+    LIVE_MODE = false;
+    $("progress").classList.remove("show");
+    await loadSignals();
   }
 }
 
