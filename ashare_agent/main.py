@@ -193,7 +193,98 @@ def build_parser() -> argparse.ArgumentParser:
     p_serve.add_argument("--reload", action="store_true")
     p_serve.set_defaults(func=cmd_serve)
 
+    p_diag = sub.add_parser("diagnose", help="网络连通性 + 数据源诊断")
+    p_diag.set_defaults(func=cmd_diagnose)
+
     return p
+
+
+def cmd_diagnose(args: argparse.Namespace) -> int:
+    """逐层定位:网络 → 股票列表 → 东方财富单股 → 新浪单股"""
+    import socket
+    import urllib.request
+    from . import data_loader
+
+    print("=" * 60)
+    print("agushare · 网络与数据源诊断")
+    print("=" * 60)
+
+    # 0) 时间 / 时区
+    from datetime import datetime
+    print(f"[0] 当前时间: {datetime.now().isoformat()}")
+
+    # 1) DNS
+    targets = ["push2.eastmoney.com", "hq.sinajs.cn", "www.baidu.com"]
+    print("\n[1] DNS 解析:")
+    for host in targets:
+        try:
+            ip = socket.gethostbyname(host)
+            print(f"   ✔ {host} -> {ip}")
+        except Exception as e:
+            print(f"   ✘ {host} 解析失败: {e}")
+
+    # 2) HTTPS 连通性 (urllib 测试)
+    urls = [
+        ("eastmoney 行情接口", "https://push2.eastmoney.com/"),
+        ("新浪行情",            "https://hq.sinajs.cn/"),
+    ]
+    print("\n[2] HTTPS 连通:")
+    for label, url in urls:
+        try:
+            req = urllib.request.Request(url, headers={
+                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
+                "Referer": "https://www.eastmoney.com/",
+            })
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                print(f"   ✔ {label}: HTTP {resp.status}")
+        except Exception as e:
+            print(f"   ✘ {label}: {type(e).__name__}: {e}")
+
+    # 3) akshare 股票列表
+    print("\n[3] akshare 股票列表 (stock_info_a_code_name):")
+    try:
+        df = data_loader.get_stock_list(exclude_st=False)
+        print(f"   ✔ 拉到 {len(df)} 只 (前 3 只: {df['code'].head(3).tolist()})")
+        sample_code = df["code"].iloc[100]  # 拿第 100 只测试
+    except Exception as e:
+        print(f"   ✘ 失败: {type(e).__name__}: {e}")
+        return 2
+
+    # 4) 单股 — 东方财富
+    from datetime import timedelta
+    print(f"\n[4] 东方财富 K线测试 (code={sample_code}):")
+    try:
+        df_raw = data_loader._fetch_em(
+            sample_code,
+            (datetime.now() - timedelta(days=60)).strftime("%Y%m%d"),
+            datetime.now().strftime("%Y%m%d"),
+            "qfq",
+        )
+        if df_raw is None or df_raw.empty:
+            print("   ⚠ 返回空 DataFrame")
+        else:
+            print(f"   ✔ 拉到 {len(df_raw)} 行")
+    except Exception as e:
+        print(f"   ✘ 失败: {type(e).__name__}: {e!r}")
+
+    # 5) 单股 — 新浪
+    print(f"\n[5] 新浪 K线测试 (code={sample_code}):")
+    try:
+        df_raw = data_loader._fetch_sina(sample_code, "qfq")
+        if df_raw is None or df_raw.empty:
+            print("   ⚠ 返回空 DataFrame")
+        else:
+            print(f"   ✔ 拉到 {len(df_raw)} 行 (最近: {df_raw.tail(1).iloc[0].to_dict()})")
+    except Exception as e:
+        print(f"   ✘ 失败: {type(e).__name__}: {e!r}")
+
+    print("\n=" * 30)
+    print("解读:")
+    print(" - [2] 任一行 HTTP 200/30x = 网络可达;若 403/401/SSL 错 = 上游主动拒绝你的 IP")
+    print(" - [4] 东方财富失败 + [5] 新浪成功 = 仅东方财富被封,代码已自动回退新浪")
+    print(" - [4][5] 都失败 = IP 在被两边都拦,建议换机房或加 HTTP 代理")
+    print(" - 全部成功 = 接口正常,之前的失败可能是临时限流,重试即可")
+    return 0
 
 
 def cmd_serve(args: argparse.Namespace) -> int:

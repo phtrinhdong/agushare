@@ -65,6 +65,61 @@ def _is_cache_fresh(path: Path, ttl_hours: int) -> bool:
     return datetime.now() - mtime < timedelta(hours=ttl_hours)
 
 
+# 模块级统计 (供日志/诊断使用,线程安全要求不严)
+_STATS = {"ok_em": 0, "ok_sina": 0, "fail": 0, "logged_first": False}
+
+
+def _normalize_em(df: pd.DataFrame, bars: int) -> pd.DataFrame:
+    """东方财富中文列名 → 英文统一格式"""
+    df = df.rename(columns={
+        "日期": "date", "开盘": "open", "收盘": "close",
+        "最高": "high", "最低": "low",
+        "成交量": "volume", "成交额": "amount",
+        "换手率": "turnover",
+    })
+    df["date"] = pd.to_datetime(df["date"])
+    df = df.set_index("date").sort_index()
+    cols = ["open", "high", "low", "close", "volume"]
+    extra = [c for c in ["amount", "turnover"] if c in df.columns]
+    return df[cols + extra].astype({c: "float64" for c in cols}).tail(bars)
+
+
+def _normalize_sina(df: pd.DataFrame, bars: int) -> pd.DataFrame:
+    """新浪接口返回的 DataFrame → 英文统一格式"""
+    # ak.stock_zh_a_daily 返回列: date,open,high,low,close,volume,...
+    if "date" in df.columns:
+        df["date"] = pd.to_datetime(df["date"])
+        df = df.set_index("date")
+    df = df.sort_index()
+    cols = ["open", "high", "low", "close", "volume"]
+    available = [c for c in cols if c in df.columns]
+    return df[available].astype({c: "float64" for c in available}).tail(bars)
+
+
+def _fetch_em(code: str, start_date: str, end_date: str, adjust: str) -> pd.DataFrame:
+    """东方财富源"""
+    return ak.stock_zh_a_hist(
+        symbol=code, period="daily",
+        start_date=start_date, end_date=end_date,
+        adjust=adjust or "",
+    )
+
+
+def _fetch_sina(code: str, adjust: str) -> pd.DataFrame:
+    """新浪源 — 用于东方财富不可达时回退。
+    sina 代码格式: sh600000 / sz000001 / bj430047
+    """
+    if code.startswith("6"):
+        sym = "sh" + code
+    elif code.startswith(("0", "3")):
+        sym = "sz" + code
+    elif code.startswith(("4", "8")):
+        sym = "bj" + code
+    else:
+        sym = "sh" + code
+    return ak.stock_zh_a_daily(symbol=sym, adjust=adjust or "")
+
+
 def fetch_kline(
     code: str,
     bars: int = 120,
@@ -75,10 +130,8 @@ def fetch_kline(
     jitter_range: tuple[float, float] = (0.05, 0.20),
 ) -> pd.DataFrame | None:
     """
-    拉取单只股票的日K线，返回 DataFrame:
-        index: date (Timestamp)
-        cols : open, high, low, close, volume, amount
-    若失败返回 None。
+    拉单只股票日K线,失败返回 None。
+    流程: 先东方财富 (带 retry),失败回退新浪 (1 次)。
     """
     if ak is None:
         raise RuntimeError("akshare 未安装")
@@ -91,52 +144,84 @@ def fetch_kline(
             df = pd.read_parquet(cache_path)
             return df.tail(bars)
         except Exception:  # noqa
-            pass  # 缓存坏了就重新拉
+            pass
 
     end_date = datetime.now().strftime("%Y%m%d")
-    # 多拉一点保证 bars 充足
     start_date = (datetime.now() - timedelta(days=bars * 2 + 60)).strftime("%Y%m%d")
 
-    last_err: Exception | None = None
+    em_err: Exception | None = None
+    sina_err: Exception | None = None
+
+    # ---------- 1. 东方财富 (主) ----------
     for attempt in range(retries + 1):
         try:
-            # 请求前抖动 sleep,避免突发并发把上游打挂
             time.sleep(random.uniform(*jitter_range))
-            df = ak.stock_zh_a_hist(
-                symbol=code,
-                period="daily",
-                start_date=start_date,
-                end_date=end_date,
-                adjust=adjust or "",
-            )
-            if df is None or df.empty:
+            df_raw = _fetch_em(code, start_date, end_date, adjust)
+            if df_raw is None or df_raw.empty:
                 return None
-
-            df = df.rename(columns={
-                "日期": "date", "开盘": "open", "收盘": "close",
-                "最高": "high", "最低": "low",
-                "成交量": "volume", "成交额": "amount",
-                "换手率": "turnover",
-            })
-            df["date"] = pd.to_datetime(df["date"])
-            df = df.set_index("date").sort_index()
-            cols = ["open", "high", "low", "close", "volume"]
-            extra = [c for c in ["amount", "turnover"] if c in df.columns]
-            df = df[cols + extra].astype({c: "float64" for c in cols})
-
-            try:
-                df.to_parquet(cache_path)
-            except Exception as e:  # parquet 写失败不要影响主流程
-                log.debug("缓存写入失败 %s: %s", code, e)
-
-            return df.tail(bars)
+            df = _normalize_em(df_raw, bars)
+            _save_cache(df, cache_path)
+            _STATS["ok_em"] += 1
+            _log_first_success(code, "eastmoney", df)
+            return df
         except Exception as e:  # noqa
-            last_err = e
-            # 指数退避 + 抖动
+            em_err = e
             time.sleep((0.5 * (2 ** attempt)) + random.uniform(0, 0.3))
 
-    log.warning("拉取 %s K线失败: %s", code, last_err)
+    # ---------- 2. 新浪 (备) ----------
+    try:
+        time.sleep(random.uniform(0.1, 0.3))
+        df_raw = _fetch_sina(code, adjust)
+        if df_raw is not None and not df_raw.empty:
+            df = _normalize_sina(df_raw, bars)
+            _save_cache(df, cache_path)
+            _STATS["ok_sina"] += 1
+            _log_first_success(code, "sina (fallback)", df)
+            return df
+    except Exception as e:
+        sina_err = e
+
+    _STATS["fail"] += 1
+    _log_first_failure(code, em_err, sina_err)
     return None
+
+
+def _save_cache(df: pd.DataFrame, cache_path: Path):
+    try:
+        df.to_parquet(cache_path)
+    except Exception as e:
+        log.debug("缓存写入失败 %s: %s", cache_path.name, e)
+
+
+def _log_first_success(code: str, src: str, df: pd.DataFrame):
+    """前几次成功打 INFO,确认源是通的"""
+    n = _STATS["ok_em"] + _STATS["ok_sina"]
+    if n <= 3:
+        log.info("✔ 拉取 %s 成功 [%s] %d 根K线 (累计 ok %d, fail %d)",
+                 code, src, len(df), n, _STATS["fail"])
+    elif n in (10, 50, 100, 500) or n % 500 == 0:
+        log.info("累计: ok=%d (em=%d, sina=%d) fail=%d",
+                 n, _STATS["ok_em"], _STATS["ok_sina"], _STATS["fail"])
+
+
+def _log_first_failure(code: str, em_err, sina_err):
+    """前 3 次失败打详细信息,后续只 WARNING"""
+    if _STATS["fail"] <= 3:
+        log.warning("✘ 拉取 %s 失败  EM=%s  SINA=%s",
+                    code, repr(em_err), repr(sina_err))
+    else:
+        log.warning("拉取 %s 失败: %s", code, repr(em_err))
+
+
+def reset_stats():
+    _STATS["ok_em"] = 0
+    _STATS["ok_sina"] = 0
+    _STATS["fail"] = 0
+    _STATS["logged_first"] = False
+
+
+def get_stats() -> dict:
+    return dict(_STATS)
 
 
 # ============================================================
