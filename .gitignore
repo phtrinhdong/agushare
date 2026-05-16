@@ -1,0 +1,58 @@
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.installed.cfg
+*.egg
+
+# ---------- 虚拟环境 ----------
+.venv/
+venv/
+env/
+ENV/
+
+# ---------- IDE ----------
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ---------- 项目运行时产物 ----------
+# 数据缓存(akshare 拉的 parquet)
+ashare_agent/cache/
+cache/
+
+# 扫描结果 / 报表 / K线图 (生成物,不进库)
+ashare_agent/output/
+output/
+
+# 日志
+ashare_agent/logs/
+logs/
+*.log
+
+# ---------- 配置中的敏感信息 ----------
+# 如果以后用 .env 存 SMTP 密码,不要进库
+.env
+.env.local
+
+# ---------- 测试 / 覆盖率 ----------
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# ---------- Jupyter ----------
+.ipynb_checkpoints/
+
+# ---------- 操作系统 ----------
+*.bak
+*.tmp

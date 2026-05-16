@@ -1,0 +1,100 @@
+# =========================================================
+# A股K线形态监控 Agent 配置
+# =========================================================
+
+# ---------- 扫描范围 ----------
+universe:
+  # 全市场扫描 (true) 还是只扫描自选股 (false)
+  scan_all: true
+  # 排除创业板/科创板 (代码以 30/68 开头)
+  exclude_chinext_star: false
+  # 排除 ST/退市 风险股票
+  exclude_st: true
+  # 排除上市不满 N 天的新股 (避免数据不足)
+  min_listed_days: 120
+  # 自选股 (scan_all=false 时生效)
+  watchlist:
+    - "600519"   # 贵州茅台
+    - "000001"   # 平安银行
+    - "300750"   # 宁德时代
+
+# ---------- 数据 ----------
+data:
+  # 拉取多少根K线 (用于形态/指标计算)
+  bars: 120
+  # 复权方式: qfq / hfq / ""
+  adjust: "qfq"
+  # 缓存目录 (相对项目根目录)
+  cache_dir: "cache"
+  # 缓存有效时间 (小时), 0 表示不缓存
+  cache_ttl_hours: 6
+
+# ---------- 形态识别开关 ----------
+patterns:
+  # 经典看涨形态
+  hammer:           true   # 锤子线
+  inverted_hammer:  true   # 倒锤子
+  bullish_engulfing: true  # 看涨吞没
+  morning_star:     true   # 启明星
+  three_white_soldiers: true # 红三兵
+  piercing_line:    true   # 刺透形态(曙光初现)
+  bullish_doji:     true   # 底部十字星
+  # 持续看涨形态
+  rising_three:     true   # 上升三法
+  gap_up:           true   # 向上跳空缺口
+  bull_arrangement: true   # 均线多头排列
+  ma_breakthrough:  true   # 突破均线
+  # 技术指标
+  macd_golden:      true   # MACD金叉
+  kdj_golden:       true   # KDJ金叉
+  rsi_oversold:     true   # RSI超卖反弹
+  boll_lower:       true   # 布林带下轨支撑
+
+# ---------- 信号筛选 ----------
+filter:
+  # 信号最低得分 (>= 该分数才会进入推荐池)
+  min_score: 3
+  # 只保留前 N 只
+  top_n: 50
+  # 是否要求至少 1 个 K线形态信号
+  require_candlestick: false
+  # 是否要求至少 1 个技术指标信号
+  require_indicator: false
+
+# ---------- 输出 ----------
+output:
+  base_dir: "output"
+  reports_dir: "output/reports"
+  charts_dir: "output/charts"
+  # 是否给命中股票画 K线图
+  draw_charts: true
+  # 最多画前 N 只 (避免画太多耗时)
+  max_charts: 20
+
+# ---------- 邮件 ----------
+email:
+  enabled: false             # 改为 true 开启邮件推送
+  smtp_server: "smtp.qq.com"
+  smtp_port: 465
+  use_ssl: true
+  sender: "your_email@qq.com"
+  password: "your_smtp_authcode"   # SMTP 授权码,不是登录密码
+  receivers:
+    - "your_email@qq.com"
+  subject_prefix: "[A股形态扫描]"
+
+# ---------- 调度 ----------
+schedule:
+  # 是否启用定时模式 (main.py --schedule)
+  enabled: true
+  # 每天扫描时刻 (24h, 收盘后) — 仅交易日
+  cron_hour: 15
+  cron_minute: 35
+  # 时区
+  timezone: "Asia/Shanghai"
+
+# ---------- 并发 / 日志 ----------
+runtime:
+  max_workers: 8             # 并发线程数
+  log_level: "INFO"
+  log_file: "logs/agent.log"

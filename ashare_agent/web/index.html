@@ -1,0 +1,384 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>A股形态扫描 · 看板</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #161a22;
+    --panel-2: #1d2230;
+    --border: #2a2f3a;
+    --text: #e6e6e6;
+    --muted: #8c93a0;
+    --accent: #4f8cff;
+    --up: #ef4f4f;
+    --down: #2cb67d;
+    --warn: #f5a623;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 0;
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", Segoe UI, sans-serif;
+    background: var(--bg); color: var(--text);
+    font-size: 14px;
+  }
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 24px; background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    position: sticky; top: 0; z-index: 10;
+  }
+  header h1 { margin: 0; font-size: 18px; font-weight: 600; }
+  header .meta { color: var(--muted); font-size: 13px; }
+
+  main { padding: 18px 24px 60px; }
+
+  .toolbar {
+    display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+    background: var(--panel); padding: 12px 16px;
+    border: 1px solid var(--border); border-radius: 8px;
+    margin-bottom: 16px;
+  }
+  .toolbar input, .toolbar select {
+    background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 10px; font-size: 13px; outline: none;
+  }
+  .toolbar input { width: 200px; }
+  .toolbar button {
+    background: var(--accent); color: #fff;
+    border: none; border-radius: 6px;
+    padding: 7px 14px; cursor: pointer; font-size: 13px;
+    transition: opacity .15s;
+  }
+  .toolbar button:hover { opacity: .85; }
+  .toolbar button.secondary { background: var(--panel-2); border: 1px solid var(--border); color: var(--text); }
+  .toolbar button:disabled { opacity: .5; cursor: not-allowed; }
+
+  .status {
+    display: inline-flex; gap: 6px; align-items: center;
+    color: var(--muted); font-size: 13px; margin-left: auto;
+  }
+  .status .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--muted);
+  }
+  .status.running .dot { background: var(--warn); animation: pulse 1.2s infinite; }
+  .status.done .dot { background: var(--down); }
+  .status.error .dot { background: var(--up); }
+  @keyframes pulse { 50% { opacity: .3; } }
+
+  table {
+    width: 100%; border-collapse: collapse;
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 8px; overflow: hidden;
+  }
+  th, td {
+    padding: 9px 12px; text-align: left;
+    border-bottom: 1px solid var(--border);
+  }
+  th {
+    background: var(--panel-2); color: var(--muted);
+    font-weight: 500; font-size: 12px;
+    text-transform: uppercase; letter-spacing: .04em;
+    cursor: pointer; user-select: none;
+    white-space: nowrap;
+  }
+  th.active { color: var(--accent); }
+  th .arrow { margin-left: 4px; opacity: .7; }
+  tbody tr:hover { background: rgba(79, 140, 255, 0.06); }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  td.up { color: var(--up); }
+  td.down { color: var(--down); }
+  td.code { font-family: ui-monospace, SF Mono, Menlo, monospace; }
+  td.score {
+    text-align: center;
+    font-weight: 600;
+  }
+  .badge {
+    display: inline-block;
+    background: rgba(79, 140, 255, 0.15);
+    color: var(--accent);
+    border: 1px solid rgba(79, 140, 255, 0.35);
+    padding: 2px 7px; border-radius: 10px;
+    font-size: 11px; margin: 2px 3px 2px 0;
+  }
+  .badge.indicator {
+    background: rgba(245, 166, 35, 0.12);
+    color: var(--warn);
+    border-color: rgba(245, 166, 35, 0.35);
+  }
+
+  .empty {
+    padding: 60px 0; text-align: center; color: var(--muted);
+  }
+
+  /* 模态框 K线图 */
+  .modal {
+    display: none; position: fixed; inset: 0;
+    background: rgba(0,0,0,.7); z-index: 100;
+    align-items: center; justify-content: center;
+  }
+  .modal.show { display: flex; }
+  .modal .inner {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 8px; padding: 16px;
+    max-width: 90vw; max-height: 90vh;
+  }
+  .modal img { max-width: 100%; max-height: 80vh; display: block; }
+  .modal .close {
+    float: right; cursor: pointer; color: var(--muted);
+    background: none; border: none; font-size: 18px;
+  }
+  .modal h3 { margin: 0 0 12px; font-size: 15px; }
+
+  .summary {
+    display: flex; gap: 14px; margin-bottom: 14px;
+  }
+  .summary .card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 8px; padding: 10px 16px; flex: 0 0 auto;
+  }
+  .summary .card .label { font-size: 11px; color: var(--muted); text-transform: uppercase; }
+  .summary .card .value { font-size: 20px; font-weight: 600; margin-top: 3px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>A股 K线形态扫描 · 看板</h1>
+  <div class="meta" id="lastUpdate">尚未扫描</div>
+</header>
+
+<main>
+  <div class="toolbar">
+    <input id="search" placeholder="搜索 代码/名称..." />
+    <select id="filterPattern">
+      <option value="">全部形态</option>
+    </select>
+    <select id="filterMinScore">
+      <option value="0">最低得分: 不限</option>
+      <option value="3">≥ 3</option>
+      <option value="5">≥ 5</option>
+      <option value="8">≥ 8</option>
+    </select>
+    <button id="btnScan">触发扫描</button>
+    <button id="btnScanWatchlist" class="secondary">扫描自选股</button>
+    <button id="btnRefresh" class="secondary">刷新数据</button>
+    <span class="status" id="status"><span class="dot"></span><span id="statusText">就绪</span></span>
+  </div>
+
+  <div class="summary">
+    <div class="card"><div class="label">命中</div><div class="value" id="cardCount">0</div></div>
+    <div class="card"><div class="label">最高得分</div><div class="value" id="cardMaxScore">—</div></div>
+    <div class="card"><div class="label">当前显示</div><div class="value" id="cardVisible">0</div></div>
+  </div>
+
+  <table id="tbl">
+    <thead>
+      <tr>
+        <th data-sort="code">代码</th>
+        <th data-sort="name">名称</th>
+        <th data-sort="close" class="num">收盘价</th>
+        <th data-sort="chg_pct" class="num">涨跌%</th>
+        <th data-sort="score" class="num">得分</th>
+        <th>K线形态</th>
+        <th>技术指标</th>
+        <th>操作</th>
+      </tr>
+    </thead>
+    <tbody id="tbody"></tbody>
+  </table>
+  <div id="empty" class="empty" style="display:none">暂无扫描结果。点击右上"触发扫描"开始。</div>
+</main>
+
+<div class="modal" id="modal" onclick="closeModal(event)">
+  <div class="inner" onclick="event.stopPropagation()">
+    <button class="close" onclick="closeModal()">×</button>
+    <h3 id="modalTitle">K线图</h3>
+    <img id="modalImg" alt="K线图" />
+  </div>
+</div>
+
+<script>
+let DATA = { results: [], scanned_at: null };
+let SORT_KEY = "score";
+let SORT_DIR = -1;  // 1 升序, -1 降序
+let POLL_TIMER = null;
+
+const $ = (id) => document.getElementById(id);
+const fmt2 = (n) => (typeof n === "number" ? n.toFixed(2) : n);
+
+async function loadSignals() {
+  const r = await fetch("/api/signals");
+  const data = await r.json();
+  DATA = data;
+  if (data.scanned_at) {
+    $("lastUpdate").textContent = "最近扫描: " + data.scanned_at.replace("T", " ");
+  }
+  $("cardCount").textContent = data.count || 0;
+  const maxScore = (data.results || []).reduce((m, r) => Math.max(m, r.score || 0), 0);
+  $("cardMaxScore").textContent = maxScore || "—";
+
+  // 收集所有形态名称 → 填充筛选下拉
+  const patternSet = new Set();
+  (data.results || []).forEach(r => {
+    (r.candlestick || []).forEach(x => patternSet.add(x));
+    (r.indicators || []).forEach(x => patternSet.add(x));
+  });
+  const sel = $("filterPattern");
+  sel.innerHTML = '<option value="">全部形态</option>' +
+    [...patternSet].sort().map(p => `<option value="${p}">${p}</option>`).join("");
+
+  renderTable();
+}
+
+function renderTable() {
+  const kw = $("search").value.trim().toLowerCase();
+  const pat = $("filterPattern").value;
+  const minScore = parseInt($("filterMinScore").value, 10);
+  let rows = (DATA.results || []).filter(r => {
+    if (minScore && r.score < minScore) return false;
+    if (kw) {
+      if (!r.code.includes(kw) && !(r.name || "").toLowerCase().includes(kw)) return false;
+    }
+    if (pat) {
+      const all = [...(r.candlestick||[]), ...(r.indicators||[])];
+      if (!all.includes(pat)) return false;
+    }
+    return true;
+  });
+
+  rows.sort((a, b) => {
+    const va = a[SORT_KEY] ?? "";
+    const vb = b[SORT_KEY] ?? "";
+    if (typeof va === "number" && typeof vb === "number") return (va - vb) * SORT_DIR;
+    return String(va).localeCompare(String(vb)) * SORT_DIR;
+  });
+
+  const tbody = $("tbody");
+  if (!rows.length) {
+    tbody.innerHTML = "";
+    $("empty").style.display = "";
+    $("cardVisible").textContent = 0;
+    return;
+  }
+  $("empty").style.display = "none";
+  $("cardVisible").textContent = rows.length;
+
+  tbody.innerHTML = rows.map(r => {
+    const chgCls = r.chg_pct > 0 ? "up" : (r.chg_pct < 0 ? "down" : "");
+    const candles = (r.candlestick || []).map(c => `<span class="badge">${c}</span>`).join("");
+    const inds = (r.indicators || []).map(c => `<span class="badge indicator">${c}</span>`).join("");
+    return `<tr>
+      <td class="code">${r.code}</td>
+      <td>${r.name || ""}</td>
+      <td class="num">${fmt2(r.close)}</td>
+      <td class="num ${chgCls}">${r.chg_pct > 0 ? "+" : ""}${fmt2(r.chg_pct)}</td>
+      <td class="score">${r.score}</td>
+      <td>${candles || "—"}</td>
+      <td>${inds || "—"}</td>
+      <td><a href="#" onclick="openChart('${r.code}','${r.name||""}');return false;">查看K线</a></td>
+    </tr>`;
+  }).join("");
+
+  // 表头排序箭头
+  document.querySelectorAll("th[data-sort]").forEach(th => {
+    th.classList.toggle("active", th.dataset.sort === SORT_KEY);
+    const arrow = SORT_DIR === 1 ? "↑" : "↓";
+    th.querySelectorAll(".arrow").forEach(s => s.remove());
+    if (th.dataset.sort === SORT_KEY) {
+      const span = document.createElement("span");
+      span.className = "arrow";
+      span.textContent = arrow;
+      th.appendChild(span);
+    }
+  });
+}
+
+document.querySelectorAll("th[data-sort]").forEach(th => {
+  th.addEventListener("click", () => {
+    const key = th.dataset.sort;
+    if (SORT_KEY === key) SORT_DIR = -SORT_DIR;
+    else { SORT_KEY = key; SORT_DIR = -1; }
+    renderTable();
+  });
+});
+
+["search", "filterPattern", "filterMinScore"].forEach(id => {
+  $(id).addEventListener("input", renderTable);
+});
+
+// ---- 扫描 ----
+async function triggerScan(watchlistOnly) {
+  $("btnScan").disabled = true;
+  $("btnScanWatchlist").disabled = true;
+  try {
+    const r = await fetch("/api/scan?watchlist_only=" + (watchlistOnly ? "true" : "false"),
+                         { method: "POST" });
+    const data = await r.json();
+    if (!r.ok) {
+      alert(data.detail || "启动扫描失败");
+      $("btnScan").disabled = false;
+      $("btnScanWatchlist").disabled = false;
+      return;
+    }
+    startPolling();
+  } catch (e) {
+    alert("扫描请求失败: " + e);
+    $("btnScan").disabled = false;
+    $("btnScanWatchlist").disabled = false;
+  }
+}
+$("btnScan").addEventListener("click", () => triggerScan(false));
+$("btnScanWatchlist").addEventListener("click", () => triggerScan(true));
+$("btnRefresh").addEventListener("click", loadSignals);
+
+function startPolling() {
+  if (POLL_TIMER) clearInterval(POLL_TIMER);
+  POLL_TIMER = setInterval(async () => {
+    try {
+      const r = await fetch("/api/scan/status");
+      const s = await r.json();
+      const elapsed = s.elapsed_sec ? ` (${s.elapsed_sec}s)` : "";
+      $("statusText").textContent = (s.message || "...") + elapsed;
+      const cls = s.error ? "error" : (s.running ? "running" : "done");
+      $("status").className = "status " + cls;
+
+      if (!s.running) {
+        clearInterval(POLL_TIMER);
+        POLL_TIMER = null;
+        $("btnScan").disabled = false;
+        $("btnScanWatchlist").disabled = false;
+        if (!s.error) await loadSignals();
+      }
+    } catch (e) { /* ignore */ }
+  }, 1500);
+}
+
+// ---- K线图弹窗 ----
+function openChart(code, name) {
+  $("modalTitle").textContent = code + " " + (name || "");
+  $("modalImg").src = "/api/chart/" + code + "?t=" + Date.now();
+  $("modal").classList.add("show");
+}
+function closeModal(e) {
+  if (e && e.target.id !== "modal" && e.type === "click") return;
+  $("modal").classList.remove("show");
+}
+
+// 初次加载
+loadSignals();
+// 启动时也轮询一次，以防进入页面时正好有扫描在跑
+fetch("/api/scan/status").then(r => r.json()).then(s => {
+  if (s.running) {
+    $("btnScan").disabled = true;
+    $("btnScanWatchlist").disabled = true;
+    startPolling();
+  }
+});
+</script>
+</body>
+</html>
