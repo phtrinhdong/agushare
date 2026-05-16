@@ -27,7 +27,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 
-from . import data_loader, reporter, storage, visualizer
+from . import data_loader, realtime, reporter, storage, visualizer, watchlist as wl
 from .patterns import (
     detect_candlestick_patterns,
     detect_indicator_signals,
@@ -433,6 +433,117 @@ def backtest_report_file(filename: str):
     if not fp.exists():
         raise HTTPException(404, "报告不存在")
     return FileResponse(fp, media_type="text/html; charset=utf-8")
+
+
+# ============================================================
+# 特别关注 (Watchlist)
+# ============================================================
+def _enrich_watchlist(items: list[dict]) -> list[dict]:
+    """给每条关注项补上实时行情 + 持仓盈亏"""
+    if not items:
+        return []
+    codes = [it["code"] for it in items]
+    quotes = realtime.get_quotes(codes)
+    out = []
+    for it in items:
+        q = quotes.get(it["code"], {})
+        price = q.get("price")
+        cost = it.get("cost_price")
+        qty = it.get("quantity")
+
+        # 持仓盈亏
+        pnl_pct = None
+        pnl_amt = None
+        if cost and price:
+            pnl_pct = (price - cost) / cost * 100
+            if qty:
+                pnl_amt = (price - cost) * qty
+
+        out.append({
+            **it,
+            "price":      price,
+            "chg_pct":    q.get("chg_pct"),
+            "chg":        q.get("chg"),
+            "volume":     q.get("volume"),
+            "high":       q.get("high"),
+            "low":        q.get("low"),
+            "open":       q.get("open"),
+            "prev_close": q.get("prev_close"),
+            "pnl_pct":    None if pnl_pct is None else round(pnl_pct, 2),
+            "pnl_amount": None if pnl_amt is None else round(pnl_amt, 2),
+            "market_value": None if (price is None or qty is None) else round(price * qty, 2),
+        })
+    return out
+
+
+@app.get("/api/watchlist")
+def list_watchlist():
+    items = _enrich_watchlist(wl.load_all())
+    return {
+        "items": items,
+        "count": len(items),
+        "trading_hours": realtime.is_trading_hours(),
+    }
+
+
+@app.post("/api/watchlist")
+def add_watchlist(payload: dict):
+    code = str(payload.get("code", "")).strip().zfill(6)
+    if not code or not code.isdigit():
+        raise HTTPException(400, "code 必填且为数字")
+
+    name = payload.get("name", "") or _get_name(code)
+    cost_price = payload.get("cost_price")
+    quantity = payload.get("quantity")
+    note = payload.get("note", "")
+
+    # 类型转换 (允许空字符串/null)
+    try:
+        cost_price = float(cost_price) if cost_price not in (None, "", 0) else None
+    except (ValueError, TypeError):
+        cost_price = None
+    try:
+        quantity = float(quantity) if quantity not in (None, "", 0) else None
+    except (ValueError, TypeError):
+        quantity = None
+
+    item = wl.add(code, name=name, cost_price=cost_price,
+                  quantity=quantity, note=note)
+    return {"ok": True, "item": item}
+
+
+@app.delete("/api/watchlist/{code}")
+def delete_watchlist(code: str):
+    ok = wl.remove(code)
+    if not ok:
+        raise HTTPException(404, "未找到该代码")
+    return {"ok": True}
+
+
+@app.patch("/api/watchlist/{code}")
+def update_watchlist(code: str, payload: dict):
+    fields = {}
+    for k in ("name", "cost_price", "quantity", "note"):
+        if k in payload:
+            v = payload[k]
+            if k in ("cost_price", "quantity"):
+                try:
+                    v = float(v) if v not in (None, "", 0) else None
+                except (ValueError, TypeError):
+                    v = None
+            fields[k] = v
+    item = wl.update(code, **fields)
+    if item is None:
+        raise HTTPException(404, "未找到该代码")
+    return {"ok": True, "item": item}
+
+
+@app.get("/api/realtime")
+def get_realtime(codes: str):
+    """codes: 逗号分隔的代码列表"""
+    code_list = [c.strip().zfill(6) for c in codes.split(",") if c.strip()]
+    return {"quotes": realtime.get_quotes(code_list),
+            "trading_hours": realtime.is_trading_hours()}
 
 
 @app.get("/api/backtest/list")
