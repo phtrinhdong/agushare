@@ -47,7 +47,41 @@ python -m ashare_agent.main schedule
 
 # 5. 启动 Web 看板 (http://127.0.0.1:8000)
 python -m ashare_agent.main serve
+
+# 6. 历史回测 (验证形态策略真实表现)
+python -m ashare_agent.main backtest --start 2024-01-01 --hold-days 5
 ```
+
+## 回测
+
+回测用历史数据复盘当前的形态识别策略，输出胜率、平均收益、最大回撤、按形态归因的统计表和净值曲线。
+
+```bash
+# 基础用法 (前 200 只股票, 2024 至今, 持 5 日, 止损 -5%, 止盈 +10%)
+python -m ashare_agent.main backtest --start 2024-01-01
+
+# 只测自选股
+python -m ashare_agent.main backtest --start 2024-01-01 \
+    --codes 600519,000001,300750
+
+# 不限股票池上限 (全市场,慢)
+python -m ashare_agent.main backtest --start 2024-01-01 --limit 0
+
+# 调整持有期 / 止盈止损
+python -m ashare_agent.main backtest --start 2024-01-01 \
+    --hold-days 3 --stop-loss -3 --take-profit 6
+
+# 禁用止盈止损 (只按持有期到期卖)
+python -m ashare_agent.main backtest --start 2024-01-01 \
+    --stop-loss 0 --take-profit 0
+```
+
+**注意事项**：
+- 默认 `--limit 200` 是为了首次跑得快。换成 `--limit 0` 才扫全市场，时间会成倍增加
+- 形态识别用截至当日的数据，下一交易日开盘买入 → 严格无 lookahead bias
+- 止盈止损用日级收盘价判断 (偏保守; 实盘日内触发可能更早)
+- 报告输出到 `output/reports/backtest_YYYYMMDD_HHMMSS.html`,浏览器打开即可
+- 同一天多个形态命中 → 按形态归因时算多笔; 净值曲线按 (code, date) 去重
 
 ## Web 看板
 

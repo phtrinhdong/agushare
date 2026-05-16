@@ -196,7 +196,108 @@ def build_parser() -> argparse.ArgumentParser:
     p_diag = sub.add_parser("diagnose", help="网络连通性 + 数据源诊断")
     p_diag.set_defaults(func=cmd_diagnose)
 
+    p_bt = sub.add_parser("backtest", help="历史回测 (验证形态策略)")
+    p_bt.add_argument("--start", required=True, help="开始日期 YYYY-MM-DD")
+    p_bt.add_argument("--end", default=None, help="结束日期 YYYY-MM-DD (默认: 今天)")
+    p_bt.add_argument("--hold-days", type=int, default=5, help="持有日数 (默认 5)")
+    p_bt.add_argument("--stop-loss", type=float, default=-5.0,
+                      help="止损 %% (默认 -5; 传 0 表示禁用)")
+    p_bt.add_argument("--take-profit", type=float, default=10.0,
+                      help="止盈 %% (默认 10; 传 0 表示禁用)")
+    p_bt.add_argument("--codes", default=None,
+                      help="只测这些代码,逗号分隔。例: 600519,000001,300750")
+    p_bt.add_argument("--codes-file", default=None,
+                      help="代码文件,每行一个 (优先级低于 --codes)")
+    p_bt.add_argument("--limit", type=int, default=200,
+                      help="universe 上限 (默认 200, 0=不限制)")
+    p_bt.add_argument("--workers", type=int, default=None,
+                      help="并发数 (默认读 config.yaml)")
+    p_bt.set_defaults(func=cmd_backtest)
+
     return p
+
+
+def cmd_backtest(args: argparse.Namespace) -> int:
+    from datetime import date
+    from . import backtest, backtest_report
+    from .data_loader import get_stock_list
+
+    cfg = load_config(args.config)
+    runtime_cfg = cfg.get("runtime", {})
+    log = setup_logger(runtime_cfg.get("log_level", "INFO"),
+                       runtime_cfg.get("log_file"))
+
+    # 解析参数
+    end = args.end or date.today().strftime("%Y-%m-%d")
+    sl = None if args.stop_loss == 0 else args.stop_loss
+    tp = None if args.take_profit == 0 else args.take_profit
+    workers = args.workers or int(runtime_cfg.get("max_workers", 3))
+
+    # 确定股票池
+    if args.codes:
+        codes = [c.strip().zfill(6) for c in args.codes.split(",") if c.strip()]
+        names_map = {}
+        try:
+            df = get_stock_list(exclude_st=False)
+            names_map = dict(zip(df["code"], df["name"]))
+        except Exception:
+            pass
+    elif args.codes_file:
+        from pathlib import Path
+        text = Path(args.codes_file).read_text(encoding="utf-8")
+        codes = [ln.strip().zfill(6) for ln in text.splitlines() if ln.strip()]
+        df = get_stock_list(exclude_st=False)
+        names_map = dict(zip(df["code"], df["name"]))
+    else:
+        df = get_stock_list(
+            exclude_chinext_star=cfg["universe"].get("exclude_chinext_star", False),
+            exclude_st=cfg["universe"].get("exclude_st", True),
+        )
+        if args.limit and args.limit > 0:
+            df = df.head(args.limit)
+        codes = df["code"].tolist()
+        names_map = dict(zip(df["code"], df["name"]))
+
+    log.info("回测股票池: %d 只 (前 5: %s)", len(codes), codes[:5])
+
+    # 跑回测
+    result = backtest.run_backtest(
+        codes=codes, names=names_map,
+        start=args.start, end=end,
+        pattern_cfg=cfg["patterns"],
+        hold_days=args.hold_days,
+        stop_loss=sl, take_profit=tp,
+        adjust=cfg["data"].get("adjust", "qfq"),
+        cache_dir=cfg["data"].get("cache_dir", "cache"),
+        cache_ttl_hours=24,
+        workers=workers,
+    )
+
+    # 控制台概览
+    o = result.overall()
+    print("\n" + "=" * 60)
+    print(f"回测概览  {args.start} ~ {end}  (持有 {args.hold_days} 日)")
+    print("=" * 60)
+    if o["count"] == 0:
+        print("  无任何交易触发 (可能区间太短或形态过滤太严)")
+    else:
+        print(f"  交易笔数:    {o['count']}")
+        print(f"  胜率:        {o['win_rate']:.1f}%")
+        print(f"  平均单笔:    {o['avg_return']:+.2f}%")
+        print(f"  累计净值:    {o['total_return']:+.2f}%")
+        print(f"  最大回撤:    {o['max_drawdown']:.2f}%")
+        print()
+        print("  按形态分组 (Top 10):")
+        print(f"  {'形态':24s}{'命中':>6s}{'胜率':>8s}{'平均':>10s}{'盈亏比':>8s}")
+        for name, s in list(result.by_pattern().items())[:10]:
+            print(f"  {name:24s}{s['count']:>6d}{s['win_rate']:>7.1f}%"
+                  f"{s['avg_return']:>+9.2f}%{s['profit_factor']:>8.2f}")
+
+    # HTML 报告
+    reports_dir = cfg["output"].get("reports_dir", "output/reports")
+    fp = backtest_report.render_html(result, reports_dir)
+    print(f"\nHTML 报告: {fp}")
+    return 0
 
 
 def cmd_diagnose(args: argparse.Namespace) -> int:

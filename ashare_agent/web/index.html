@@ -164,6 +164,93 @@
     font-size: 12px;
   }
 
+  /* 回测模态框 */
+  .bt-form { width: 540px; max-width: 90vw; }
+  .bt-form .row {
+    display: flex; gap: 10px; margin-bottom: 10px; align-items: center;
+  }
+  .bt-form label {
+    width: 100px; color: var(--muted); font-size: 13px;
+  }
+  .bt-form input, .bt-form textarea {
+    flex: 1; background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 4px;
+    padding: 6px 10px; font-size: 13px; outline: none;
+    font-family: inherit;
+  }
+  .bt-form textarea { font-family: ui-monospace, Menlo, monospace; min-height: 50px; }
+  .bt-form .hint-inline { color: var(--muted); font-size: 11px; }
+  .bt-form .actions {
+    display: flex; gap: 8px; margin-top: 14px; justify-content: flex-end;
+  }
+  .bt-form button {
+    padding: 7px 16px; border-radius: 6px; cursor: pointer;
+    font-size: 13px; border: none;
+  }
+  .bt-form button.primary { background: var(--accent); color: #fff; }
+  .bt-form button.secondary {
+    background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+  }
+  .bt-form button:disabled { opacity: .5; cursor: not-allowed; }
+
+  .bt-result {
+    margin-top: 14px; padding: 12px;
+    background: var(--panel-2); border: 1px solid var(--border);
+    border-radius: 6px;
+  }
+  .bt-result .stats { display: flex; gap: 14px; flex-wrap: wrap; margin-bottom: 10px; }
+  .bt-result .stat .label { color: var(--muted); font-size: 11px; }
+  .bt-result .stat .value { font-size: 16px; font-weight: 600; margin-top: 2px; }
+
+  .bt-history {
+    margin-top: 14px; max-height: 200px; overflow-y: auto;
+    border-top: 1px solid var(--border); padding-top: 12px;
+  }
+  .bt-history h4 { margin: 0 0 8px; font-size: 12px; color: var(--muted);
+                   text-transform: uppercase; letter-spacing: .05em; }
+  .bt-history a {
+    display: block; padding: 5px 8px; border-radius: 4px;
+    color: var(--text); text-decoration: none; font-size: 12px;
+  }
+  .bt-history a:hover { background: var(--panel); }
+  .bt-history .small { color: var(--muted); margin-left: 6px; font-size: 11px; }
+
+  /* 选择栏 (选中股票后出现) */
+  .sel-bar {
+    display: none;
+    background: var(--panel); border: 1px solid var(--accent);
+    border-radius: 8px; padding: 10px 14px;
+    margin-bottom: 14px;
+    align-items: center; gap: 12px;
+  }
+  .sel-bar.show { display: flex; }
+  .sel-bar .count {
+    color: var(--accent); font-weight: 600; font-size: 14px;
+  }
+  .sel-bar .codes {
+    color: var(--muted); font-size: 12px; flex: 1;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-family: ui-monospace, Menlo, monospace;
+  }
+  .sel-bar button {
+    padding: 5px 12px; border-radius: 5px; cursor: pointer;
+    font-size: 12px; border: none;
+  }
+  .sel-bar button.primary { background: var(--accent); color: #fff; }
+  .sel-bar button.secondary {
+    background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--border);
+  }
+
+  /* 复选框列 */
+  table .check-col { width: 32px; text-align: center; padding: 6px 0; }
+  table input[type="checkbox"] { cursor: pointer; }
+  .action-link {
+    color: var(--accent); text-decoration: none; font-size: 12px;
+  }
+  .action-link:hover { text-decoration: underline; }
+  .action-link + .action-link { margin-left: 8px; }
+
   .summary {
     display: flex; gap: 14px; margin-bottom: 14px; flex-wrap: wrap;
   }
@@ -223,6 +310,7 @@
     </select>
     <button id="btnScan">触发扫描</button>
     <button id="btnScanWatchlist" class="secondary">扫描自选股</button>
+    <button id="btnBacktest" class="secondary">回测</button>
     <button id="btnRefresh" class="secondary">刷新数据</button>
     <span class="status" id="status"><span class="dot"></span><span id="statusText">就绪</span></span>
   </div>
@@ -240,9 +328,17 @@
     <div class="text" id="progressText">—</div>
   </div>
 
+  <div class="sel-bar" id="selBar">
+    <div class="count" id="selCount">已选 0 只</div>
+    <div class="codes" id="selCodes"></div>
+    <button class="primary" onclick="backtestSelected()">回测选中</button>
+    <button class="secondary" onclick="clearSelection()">清空</button>
+  </div>
+
   <table id="tbl">
     <thead>
       <tr>
+        <th class="check-col"><input type="checkbox" id="selAll" /></th>
         <th data-sort="code">代码</th>
         <th data-sort="name">名称</th>
         <th data-sort="close" class="num">收盘价</th>
@@ -269,6 +365,59 @@
   </div>
 </div>
 
+<!-- 回测模态框 -->
+<div class="modal" id="btModal" onclick="closeBtModal(event)">
+  <div class="inner" onclick="event.stopPropagation()">
+    <button class="close" onclick="closeBtModal()">×</button>
+    <h3>历史回测</h3>
+    <div class="bt-form" id="btForm">
+      <div class="row">
+        <label>开始日期</label>
+        <input type="date" id="btStart" value="2024-01-01" />
+      </div>
+      <div class="row">
+        <label>结束日期</label>
+        <input type="date" id="btEnd" />
+      </div>
+      <div class="row">
+        <label>持有日数</label>
+        <input type="number" id="btHold" value="5" min="1" max="60" />
+        <span class="hint-inline">入场后持有 N 个交易日</span>
+      </div>
+      <div class="row">
+        <label>止损 (%)</label>
+        <input type="number" id="btSL" value="-5" step="0.5" />
+        <span class="hint-inline">达到则提前卖出。0 = 禁用</span>
+      </div>
+      <div class="row">
+        <label>止盈 (%)</label>
+        <input type="number" id="btTP" value="10" step="0.5" />
+        <span class="hint-inline">达到则提前卖出。0 = 禁用</span>
+      </div>
+      <div class="row">
+        <label>股票池上限</label>
+        <input type="number" id="btLimit" value="200" min="0" />
+        <span class="hint-inline">0 = 全市场 (慢,几十分钟到几小时)</span>
+      </div>
+      <div class="row">
+        <label>自定义代码</label>
+        <textarea id="btCodes" placeholder="逗号分隔,留空则按"股票池上限"取前 N 只&#10;例: 600519,000001,300750"></textarea>
+      </div>
+      <div class="actions">
+        <button class="secondary" onclick="closeBtModal()">取消</button>
+        <button class="primary" id="btRun" onclick="startBacktest()">开始回测</button>
+      </div>
+
+      <div class="bt-result" id="btResult" style="display:none"></div>
+
+      <div class="bt-history" id="btHistoryBlock">
+        <h4>历史报告</h4>
+        <div id="btHistory">加载中…</div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script>
 let DATA = { results: [], scanned_at: null };
 let SORT_KEY = "score";
@@ -276,6 +425,7 @@ let SORT_DIR = -1;  // 1 升序, -1 降序
 let POLL_TIMER = null;
 let LIVE_MODE = false;            // 扫描中?
 let LIVE_PREV_CODES = new Set();  // 上次轮询时已存在的代码,用于高亮新命中
+let SELECTED = new Set();         // 选中的股票代码 (跨筛选/排序保留)
 
 const $ = (id) => document.getElementById(id);
 const fmt2 = (n) => (typeof n === "number" ? n.toFixed(2) : n);
@@ -373,7 +523,10 @@ function renderTable() {
     // 实时模式下,新出现的行加 flash 动画
     const isNew = LIVE_MODE && !LIVE_PREV_CODES.has(r.code);
     const rowCls = isNew ? "new-hit" : "";
+    const checked = SELECTED.has(r.code) ? "checked" : "";
+    const nameEsc = (r.name || "").replace(/'/g, "\\'");
     return `<tr class="${rowCls}">
+      <td class="check-col"><input type="checkbox" class="rowSel" data-code="${r.code}" ${checked}/></td>
       <td class="code">${r.code}</td>
       <td>${r.name || ""}</td>
       <td class="num">${fmt2(r.close)}</td>
@@ -381,10 +534,14 @@ function renderTable() {
       <td class="score">${r.score}</td>
       <td>${candles || "—"}</td>
       <td>${inds || "—"}</td>
-      <td><a href="#" onclick="openChart('${r.code}','${r.name||""}');return false;">查看K线</a></td>
+      <td>
+        <a href="#" class="action-link" onclick="openChart('${r.code}','${nameEsc}');return false;">查看K线</a>
+        <a href="#" class="action-link" onclick="openBtModal('${r.code}');return false;">回测</a>
+      </td>
     </tr>`;
   }).join("");
   LIVE_PREV_CODES = currentCodes;
+  syncSelAllCheckbox();
 
   // 表头排序箭头
   document.querySelectorAll("th[data-sort]").forEach(th => {
@@ -512,6 +669,225 @@ function closeModal(e) {
   if (e && e.target.id !== "modal" && e.type === "click") return;
   $("modal").classList.remove("show");
 }
+
+// ============================================================
+// 多选 / 选择栏
+// ============================================================
+function updateSelBar() {
+  const n = SELECTED.size;
+  if (n === 0) {
+    $("selBar").classList.remove("show");
+    return;
+  }
+  $("selBar").classList.add("show");
+  $("selCount").textContent = `已选 ${n} 只`;
+  const codes = [...SELECTED];
+  const preview = codes.slice(0, 8).join(", ") + (codes.length > 8 ? `, +${codes.length-8}` : "");
+  $("selCodes").textContent = preview;
+}
+
+function syncSelAllCheckbox() {
+  const visible = document.querySelectorAll(".rowSel");
+  if (visible.length === 0) {
+    $("selAll").checked = false;
+    $("selAll").indeterminate = false;
+    return;
+  }
+  const checked = [...visible].filter(c => c.checked).length;
+  $("selAll").checked = checked === visible.length;
+  $("selAll").indeterminate = checked > 0 && checked < visible.length;
+}
+
+document.addEventListener("change", (e) => {
+  if (e.target.classList.contains("rowSel")) {
+    const code = e.target.dataset.code;
+    if (e.target.checked) SELECTED.add(code);
+    else SELECTED.delete(code);
+    updateSelBar();
+    syncSelAllCheckbox();
+  } else if (e.target.id === "selAll") {
+    const visible = document.querySelectorAll(".rowSel");
+    visible.forEach(c => {
+      c.checked = e.target.checked;
+      const code = c.dataset.code;
+      if (e.target.checked) SELECTED.add(code);
+      else SELECTED.delete(code);
+    });
+    updateSelBar();
+  }
+});
+
+function clearSelection() {
+  SELECTED.clear();
+  document.querySelectorAll(".rowSel").forEach(c => c.checked = false);
+  $("selAll").checked = false;
+  updateSelBar();
+}
+
+function backtestSelected() {
+  if (SELECTED.size === 0) return;
+  openBtModal([...SELECTED].join(","));
+}
+
+// ============================================================
+// 回测
+// ============================================================
+let BT_POLL = null;
+
+function openBtModal(prefillCodes) {
+  // 默认结束日期 = 今天
+  if (!$("btEnd").value) {
+    const d = new Date();
+    $("btEnd").value = d.toISOString().slice(0, 10);
+  }
+  // 预填代码 (可以是单只如 "600519", 也可以是多只如 "600519,000001")
+  if (prefillCodes && typeof prefillCodes === "string") {
+    $("btCodes").value = prefillCodes;
+    const n = prefillCodes.split(",").filter(c => c.trim()).length;
+    // 滚动到代码框,加一个高亮提示
+    setTimeout(() => {
+      $("btCodes").style.borderColor = "var(--accent)";
+      setTimeout(() => $("btCodes").style.borderColor = "", 1500);
+    }, 100);
+  }
+  $("btModal").classList.add("show");
+  loadBtHistory();
+  // 进入时主动看一下是不是有正在跑的回测
+  fetch("/api/backtest/status").then(r => r.json()).then(s => {
+    if (s.running) {
+      $("btRun").disabled = true;
+      $("btResult").style.display = "";
+      renderBtRunning(s);
+      pollBt();
+    }
+  });
+}
+
+function closeBtModal(e) {
+  if (e && e.target.id !== "btModal" && e.type === "click") return;
+  $("btModal").classList.remove("show");
+}
+
+async function loadBtHistory() {
+  try {
+    const r = await fetch("/api/backtest/list");
+    const data = await r.json();
+    const list = data.items || [];
+    if (!list.length) {
+      $("btHistory").innerHTML = '<div style="color:var(--muted);font-size:12px">暂无历史报告</div>';
+      return;
+    }
+    $("btHistory").innerHTML = list.map(it =>
+      `<a href="/api/backtest/report/${it.file}" target="_blank">📄 ${it.file}<span class="small">${it.mtime} · ${it.size_kb} KB</span></a>`
+    ).join("");
+  } catch (e) {
+    $("btHistory").innerHTML = '<div style="color:var(--up);font-size:12px">加载失败</div>';
+  }
+}
+
+async function startBacktest() {
+  const params = {
+    start: $("btStart").value,
+    end:   $("btEnd").value,
+    hold_days:   parseInt($("btHold").value, 10),
+    stop_loss:   parseFloat($("btSL").value),
+    take_profit: parseFloat($("btTP").value),
+    limit:       parseInt($("btLimit").value, 10),
+    codes:       $("btCodes").value.trim(),
+  };
+  if (!params.start) {
+    alert("请填写开始日期");
+    return;
+  }
+
+  $("btRun").disabled = true;
+  $("btResult").style.display = "";
+  $("btResult").innerHTML =
+    '<div style="display:flex;align-items:center;gap:10px">' +
+    '<div class="spinner" style="width:20px;height:20px;border-width:2px"></div>' +
+    '<div>启动回测中...</div></div>';
+
+  try {
+    const r = await fetch("/api/backtest", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(params),
+    });
+    if (!r.ok) {
+      const d = await r.json();
+      throw new Error(d.detail || `HTTP ${r.status}`);
+    }
+    pollBt();
+  } catch (e) {
+    $("btResult").innerHTML = `<div style="color:var(--up)">启动失败: ${e.message || e}</div>`;
+    $("btRun").disabled = false;
+  }
+}
+
+function pollBt() {
+  if (BT_POLL) clearInterval(BT_POLL);
+  BT_POLL = setInterval(async () => {
+    try {
+      const r = await fetch("/api/backtest/status");
+      const s = await r.json();
+      if (s.running) {
+        renderBtRunning(s);
+      } else {
+        clearInterval(BT_POLL); BT_POLL = null;
+        $("btRun").disabled = false;
+        if (s.error) {
+          $("btResult").innerHTML =
+            `<div style="color:var(--up)">回测失败: ${s.error}</div>`;
+        } else {
+          renderBtDone(s);
+          loadBtHistory();   // 刷新历史报告列表
+        }
+      }
+    } catch (e) { /* ignore */ }
+  }, 2000);
+}
+
+function renderBtRunning(s) {
+  const elapsed = s.elapsed_sec ? ` (${s.elapsed_sec}s)` : "";
+  $("btResult").innerHTML =
+    '<div style="display:flex;align-items:center;gap:10px">' +
+    '<div class="spinner" style="width:20px;height:20px;border-width:2px"></div>' +
+    `<div>${s.message}${elapsed}</div></div>`;
+}
+
+function renderBtDone(s) {
+  const sum = s.summary || {};
+  const pat = (sum.top_patterns || []).slice(0, 5).map(p =>
+    `<tr><td>${p.name}</td><td class="num">${p.count}</td>
+     <td class="num">${p.win_rate}%</td>
+     <td class="num">${p.avg_return >= 0 ? "+" : ""}${p.avg_return}%</td></tr>`
+  ).join("");
+  const reportUrl = s.report_file ? `/api/backtest/report/${s.report_file}` : null;
+  $("btResult").innerHTML = `
+    <div class="stats">
+      <div class="stat"><div class="label">交易笔数</div>
+        <div class="value">${sum.count || 0}</div></div>
+      <div class="stat"><div class="label">胜率</div>
+        <div class="value">${sum.win_rate || 0}%</div></div>
+      <div class="stat"><div class="label">平均收益</div>
+        <div class="value">${sum.avg_return >= 0 ? "+" : ""}${sum.avg_return || 0}%</div></div>
+      <div class="stat"><div class="label">累计净值</div>
+        <div class="value">${sum.total_return >= 0 ? "+" : ""}${sum.total_return || 0}%</div></div>
+      <div class="stat"><div class="label">最大回撤</div>
+        <div class="value">${sum.max_drawdown || 0}%</div></div>
+    </div>
+    ${pat ? `<table style="margin-top:8px;font-size:12px">
+       <thead><tr><th>形态 Top5</th><th>命中</th><th>胜率</th><th>平均</th></tr></thead>
+       <tbody>${pat}</tbody></table>` : ""}
+    ${reportUrl
+      ? `<div style="margin-top:10px"><a href="${reportUrl}" target="_blank"
+            style="display:inline-block;padding:7px 14px;background:var(--accent);color:#fff;
+                   border-radius:6px;text-decoration:none;font-size:13px">查看完整报告 ↗</a></div>`
+      : ""}
+  `;
+}
+
+$("btnBacktest").addEventListener("click", openBtModal);
 
 // 初次加载
 loadSignals();

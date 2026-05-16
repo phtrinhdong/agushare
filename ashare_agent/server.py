@@ -111,6 +111,66 @@ STATE = ScanState()
 
 
 # ============================================================
+# 回测状态 (独立于扫描)
+# ============================================================
+class BacktestState:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.running = False
+        self.started_at: float | None = None
+        self.finished_at: float | None = None
+        self.message = "idle"
+        self.error: str | None = None
+        self.params: dict = {}
+        self.report_file: str | None = None     # 仅文件名,如 backtest_xxxx.html
+        self.summary: dict = {}                 # 关键指标速览
+
+    def reset(self, params: dict):
+        with self.lock:
+            self.running = True
+            self.started_at = time.time()
+            self.finished_at = None
+            self.message = "拉取数据 + 回测中..."
+            self.error = None
+            self.params = params
+            self.report_file = None
+            self.summary = {}
+
+    def update_message(self, msg: str):
+        with self.lock:
+            self.message = msg
+
+    def finish(self, summary: dict, report_file: str | None,
+               error: str | None = None):
+        with self.lock:
+            self.running = False
+            self.finished_at = time.time()
+            self.summary = summary
+            self.report_file = report_file
+            self.error = error
+            self.message = "完成" if error is None else "失败"
+
+    def to_dict(self) -> dict:
+        with self.lock:
+            elapsed = None
+            if self.started_at:
+                end = self.finished_at or time.time()
+                elapsed = round(end - self.started_at, 1)
+            return {
+                "running": self.running,
+                "message": self.message,
+                "error": self.error,
+                "params": self.params,
+                "summary": self.summary,
+                "report_file": self.report_file,
+                "elapsed_sec": elapsed,
+            }
+
+
+BT_STATE = BacktestState()
+
+
+# ============================================================
 # 后台扫描
 # ============================================================
 def _run_scan_background(cfg: dict):
@@ -257,6 +317,141 @@ def scan_status():
 def list_snapshots():
     reports_dir = _CFG["output"].get("reports_dir", "output/reports")
     return {"items": storage.list_snapshots(reports_dir)}
+
+
+# ============================================================
+# 回测
+# ============================================================
+def _run_backtest_background(params: dict):
+    """在后台线程跑回测,完成后写 BT_STATE"""
+    from datetime import date
+    from . import backtest, backtest_report
+    from .data_loader import get_stock_list
+
+    BT_STATE.reset(params)
+    try:
+        # 解析参数
+        start = params.get("start") or "2024-01-01"
+        end = params.get("end") or date.today().strftime("%Y-%m-%d")
+        hold_days = int(params.get("hold_days", 5))
+        sl = params.get("stop_loss")
+        tp = params.get("take_profit")
+        sl = None if (sl is None or float(sl) == 0) else float(sl)
+        tp = None if (tp is None or float(tp) == 0) else float(tp)
+
+        limit = int(params.get("limit", 200))
+        codes_str = (params.get("codes") or "").strip()
+
+        BT_STATE.update_message("加载股票池...")
+        if codes_str:
+            codes = [c.strip().zfill(6) for c in codes_str.split(",") if c.strip()]
+            try:
+                df = get_stock_list(exclude_st=False)
+                names_map = dict(zip(df["code"], df["name"]))
+            except Exception:
+                names_map = {}
+        else:
+            df = get_stock_list(
+                exclude_chinext_star=_CFG["universe"].get("exclude_chinext_star", False),
+                exclude_st=_CFG["universe"].get("exclude_st", True),
+            )
+            if limit > 0:
+                df = df.head(limit)
+            codes = df["code"].tolist()
+            names_map = dict(zip(df["code"], df["name"]))
+
+        BT_STATE.update_message(f"回测 {len(codes)} 只股票 · {start} ~ {end}")
+
+        result = backtest.run_backtest(
+            codes=codes, names=names_map,
+            start=start, end=end,
+            pattern_cfg=_CFG["patterns"],
+            hold_days=hold_days,
+            stop_loss=sl, take_profit=tp,
+            adjust=_CFG["data"].get("adjust", "qfq"),
+            cache_dir=_CFG["data"].get("cache_dir", "cache"),
+            cache_ttl_hours=24,
+            workers=int(_CFG.get("runtime", {}).get("max_workers", 3)),
+        )
+
+        BT_STATE.update_message("生成 HTML 报告...")
+        reports_dir = _CFG["output"].get("reports_dir", "output/reports")
+        fp = backtest_report.render_html(result, reports_dir)
+
+        o = result.overall()
+        summary = {
+            "count": o.get("count", 0),
+            "win_rate": round(o.get("win_rate", 0), 1),
+            "avg_return": round(o.get("avg_return", 0), 2),
+            "total_return": round(o.get("total_return", 0), 2),
+            "max_drawdown": round(o.get("max_drawdown", 0), 2),
+            "universe_size": len(codes),
+            "top_patterns": [
+                {"name": k, "count": v["count"],
+                 "win_rate": round(v["win_rate"], 1),
+                 "avg_return": round(v["avg_return"], 2)}
+                for k, v in list(result.by_pattern().items())[:5]
+            ],
+        }
+        BT_STATE.finish(summary=summary, report_file=fp.name)
+    except Exception as e:
+        log.exception("回测失败")
+        BT_STATE.finish(summary={}, report_file=None, error=str(e))
+
+
+@app.post("/api/backtest")
+def trigger_backtest(payload: dict):
+    """触发回测 (后台线程)"""
+    with BT_STATE.lock:
+        if BT_STATE.running:
+            raise HTTPException(409, "已有回测正在运行")
+    if STATE.to_dict()["running"]:
+        raise HTTPException(409, "扫描正在运行,请等待扫描完成再回测")
+
+    t = threading.Thread(target=_run_backtest_background, args=(payload,),
+                         daemon=True)
+    t.start()
+    return {"ok": True, "message": "已启动后台回测"}
+
+
+@app.get("/api/backtest/status")
+def backtest_status():
+    return BT_STATE.to_dict()
+
+
+@app.get("/api/backtest/report/{filename}")
+def backtest_report_file(filename: str):
+    """返回 HTML 报告 (仅允许 backtest_*.html, 防路径穿越)"""
+    if not filename.startswith("backtest_") or not filename.endswith(".html"):
+        raise HTTPException(400, "非法文件名")
+    if "/" in filename or "\\" in filename or ".." in filename:
+        raise HTTPException(400, "非法文件名")
+    reports_dir = Path(_CFG["output"].get("reports_dir", "output/reports"))
+    if not reports_dir.is_absolute():
+        reports_dir = project_path(str(reports_dir))
+    fp = reports_dir / filename
+    if not fp.exists():
+        raise HTTPException(404, "报告不存在")
+    return FileResponse(fp, media_type="text/html; charset=utf-8")
+
+
+@app.get("/api/backtest/list")
+def backtest_list():
+    """列出历史回测报告"""
+    reports_dir = Path(_CFG["output"].get("reports_dir", "output/reports"))
+    if not reports_dir.is_absolute():
+        reports_dir = project_path(str(reports_dir))
+    if not reports_dir.exists():
+        return {"items": []}
+    items = []
+    for fp in sorted(reports_dir.glob("backtest_*.html"), reverse=True):
+        items.append({
+            "file": fp.name,
+            "size_kb": round(fp.stat().st_size / 1024, 1),
+            "mtime": time.strftime("%Y-%m-%d %H:%M",
+                                   time.localtime(fp.stat().st_mtime)),
+        })
+    return {"items": items[:30]}
 
 
 # ============================================================
