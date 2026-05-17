@@ -32,10 +32,11 @@ services:
     volumes:
       # 配置文件 (改完不用 rebuild,重启容器即可)
       - ./ashare_agent/config.yaml:/app/ashare_agent/config.yaml:ro
-      # 数据持久化
-      - ./data/cache:/app/cache
-      - ./data/output:/app/output
-      - ./data/logs:/app/logs
+      # 数据持久化 - 路径必须匹配代码写入的实际位置 /app/ashare_agent/...
+      - ./data/cache:/app/ashare_agent/cache               # akshare K线 parquet
+      - ./data/output:/app/ashare_agent/output             # 扫描报告/K线图/回测观察
+      - ./data/logs:/app/ashare_agent/logs                 # agent.log
+      - ./data/agent_data:/app/ashare_agent/data           # 历史数据库 + watchlist.json
       # 用户自定义形态目录 (热挂载, 改完重启容器生效)
       - ./ashare_agent/patterns/custom:/app/ashare_agent/patterns/custom:ro
     healthcheck:
@@ -54,9 +55,10 @@ services:
       TZ: Asia/Shanghai
     volumes:
       - ./ashare_agent/config.yaml:/app/ashare_agent/config.yaml:ro
-      - ./data/cache:/app/cache
-      - ./data/output:/app/output
-      - ./data/logs:/app/logs
+      - ./data/cache:/app/ashare_agent/cache
+      - ./data/output:/app/ashare_agent/output
+      - ./data/logs:/app/ashare_agent/logs
+      - ./data/agent_data:/app/ashare_agent/data
       - ./ashare_agent/patterns/custom:/app/ashare_agent/patterns/custom:ro
     command:
       - python
@@ -66,8 +68,15 @@ services:
     depends_on:
       - web
 
-# 数据卷说明:
-#   data/cache         akshare 拉到的日K parquet,加速重复扫描
-#   data/output/reports  每日 Excel + JSON 快照
-#   data/output/charts   每日 K线图 PNG
-#   data/logs            agent.log
+# 数据卷说明 (宿主机路径 → 容器内路径):
+#   data/cache         /app/ashare_agent/cache              akshare 拉到的日K parquet
+#   data/output        /app/ashare_agent/output             reports/charts/observations
+#     ├── reports/      每日 Excel + JSON 快照 + 回测 HTML 报告
+#     ├── charts/       K线图 PNG
+#     └── observations/ K型回测观察结果 JSON
+#   data/logs          /app/ashare_agent/logs               agent.log
+#   data/agent_data    /app/ashare_agent/data               历史数据库 + 关注列表
+#     ├── history/      深度 K线缓存 (回测观察用)
+#     └── watchlist.json 特别关注列表
+
+# 重要: 所有这些数据在 docker compose down / up / build / restart 后都会保留

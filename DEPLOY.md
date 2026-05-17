@@ -41,13 +41,24 @@ date     # 看到 "CST 2026" 字样即正确
 
 ## 3. 拉代码
 
-```bash
-sudo mkdir -p /opt && cd /opt
-sudo chown $USER:$USER /opt
+随便选个你有权限的目录,比如 `/root/zhang/` 或 `/opt/`:
 
+```bash
+# 例如:
+cd /root/zhang
+git clone https://github.com/phtrinhdong/agushare.git
+cd agushare
+
+# 或者:
+sudo mkdir -p /opt && sudo chown $USER:$USER /opt
+cd /opt
 git clone https://github.com/phtrinhdong/agushare.git
 cd agushare
 ```
+
+后文用 `$AGUSHARE_DIR` 表示你的项目目录 (替换成你实际的路径,如 `/root/zhang/agushare` 或 `/opt/agushare`)。
+
+所有数据会保存在 `$AGUSHARE_DIR/data/` 下,docker-compose 用相对路径挂载,所以**只要在项目目录下执行 docker 命令,数据就跟着这个目录走**。
 
 如果是私有仓库，先配 SSH key：
 
@@ -62,7 +73,7 @@ git clone git@github.com:phtrinhdong/agushare.git
 ## 4. 首次部署
 
 ```bash
-cd /opt/agushare
+cd $AGUSHARE_DIR
 
 # 1) 复制并编辑环境变量 (用户名密码,公网部署务必填强密码)
 cp .env.example .env
@@ -85,12 +96,57 @@ vi ashare_agent/config.yaml
 
 ---
 
+## 数据持久化总览
+
+所有运行时数据都挂出到宿主机 `$AGUSHARE_DIR/data/` 下，**docker rebuild / restart / down + up 都不会丢失**：
+
+```
+$AGUSHARE_DIR/data/
+├── cache/                     # K线 parquet 短期缓存 (6h TTL)
+├── output/
+│   ├── reports/               # 扫描 Excel + JSON 快照 + 回测 HTML 报告
+│   ├── charts/                # K线图 PNG
+│   └── observations/          # K型回测观察结果 JSON
+├── logs/                      # agent.log
+└── agent_data/                # 长期数据 (新)
+    ├── history/               # 历史 K线数据库 (~800 根/股, 用于回测观察)
+    └── watchlist.json         # 特别关注列表 (含成本价/数量)
+```
+
+历史快照（每次扫描的 `signals_*.json`）永久保留在 `data/output/reports/` 里，最旧的可以追溯到部署第一天。
+
+## ⚠️ 路径修正 (重要)
+
+**早期版本的 docker-compose.yml 挂载路径有误**——挂载点是 `/app/cache` 等，但代码实际写入 `/app/ashare_agent/cache`。结果是：**容器层有数据，但宿主机看到的 `data/` 目录是空的，重建镜像后数据丢失**。
+
+新版本已修正路径。如果你之前**已经在跑老版本**，做这次 `./deploy.sh update` 时：
+
+1. **容器内已有的扫描历史、缓存会丢**（但通常不重要，重新扫描会快速补齐）
+2. **建议**：先把容器内的有用数据 copy 出来：
+
+   ```bash
+   # 在 update 之前先备份
+   docker compose exec web tar czf /tmp/agushare_backup.tgz \
+       /app/ashare_agent/cache /app/ashare_agent/output \
+       /app/ashare_agent/data 2>/dev/null || true
+   docker cp agushare-web:/tmp/agushare_backup.tgz ./
+   
+   # 然后 update
+   ./deploy.sh update
+   
+   # 把数据恢复到宿主机 (展开到正确目录)
+   tar xzf agushare_backup.tgz -C ./data --strip-components=2 \
+       app/ashare_agent/cache app/ashare_agent/output app/ashare_agent/data 2>/dev/null || true
+   ```
+
+如果不在意之前的扫描历史，可以直接 `./deploy.sh update`，后续数据会正确持久化。
+
 ## 5. 日常更新（git pull → 重新部署）
 
 代码改动后，在**服务器上**：
 
 ```bash
-cd /opt/agushare
+cd $AGUSHARE_DIR
 ./deploy.sh update
 ```
 

@@ -19,7 +19,8 @@ case "$cmd" in
   init)
     [ -f .env ] || cp .env.example .env
     echo "已生成 .env,记得编辑里面的 AGU_AUTH_PASS 等敏感字段后再继续。"
-    mkdir -p data/cache data/output/reports data/output/charts data/logs
+    mkdir -p data/cache data/output/reports data/output/charts data/output/observations \
+             data/logs data/agent_data/history
     docker compose up -d --build
     docker compose ps
     ;;
