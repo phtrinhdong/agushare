@@ -45,8 +45,9 @@ log = logging.getLogger("ashare_agent")
 class ScanState:
     """扫描状态 + 实时进度 + 实时命中列表 (供 Web 边扫边显示)"""
 
-    # 推到前端的最大行数 (按得分排序后取前 N)
-    MAX_LIVE_ROWS = 200
+    # 实时推送给前端的最大行数 (扫描中,按得分排序后取前 N)
+    # 扫完后前端会从 /api/signals 拿全部 (不受此限制)
+    MAX_LIVE_ROWS = 2000
 
     def __init__(self):
         self.lock = threading.Lock()

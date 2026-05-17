@@ -480,9 +480,18 @@
     </div>
     <select id="filterMinScore">
       <option value="0">最低得分: 不限</option>
-      <option value="3">≥ 3</option>
-      <option value="5">≥ 5</option>
-      <option value="8">≥ 8</option>
+      <option value="3">得分 ≥ 3</option>
+      <option value="5">得分 ≥ 5</option>
+      <option value="7">得分 ≥ 7</option>
+      <option value="10">得分 ≥ 10</option>
+      <option value="15">得分 ≥ 15</option>
+    </select>
+    <select id="limitRows">
+      <option value="0">显示全部</option>
+      <option value="50">前 50 行</option>
+      <option value="100">前 100 行</option>
+      <option value="200">前 200 行</option>
+      <option value="500">前 500 行</option>
     </select>
     <button id="btnScan">扫描全市场</button>
     <button id="btnScanWatchlist" class="secondary">扫描特别关注</button>
@@ -819,6 +828,12 @@ function renderTable() {
     return String(va).localeCompare(String(vb)) * SORT_DIR;
   });
 
+  // 行数上限 (性能优化)
+  const limit = parseInt($("limitRows").value, 10);
+  if (limit > 0 && rows.length > limit) {
+    rows = rows.slice(0, limit);
+  }
+
   const tbody = $("tbody");
   if (!rows.length) {
     tbody.innerHTML = "";
@@ -910,8 +925,9 @@ document.querySelectorAll("th[data-sort]").forEach(th => {
   });
 });
 
-["search", "filterMinScore"].forEach(id => {
+["search", "filterMinScore", "limitRows"].forEach(id => {
   $(id).addEventListener("input", renderTable);
+  $(id).addEventListener("change", renderTable);
 });
 
 // ---- 扫描 ----
