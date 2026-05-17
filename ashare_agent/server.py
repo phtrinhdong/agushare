@@ -27,7 +27,10 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 
-from . import data_loader, prefetcher, realtime, reporter, storage, visualizer, watchlist as wl
+from . import (
+    data_loader, prefetcher, pattern_observer, realtime,
+    reporter, storage, visualizer, watchlist as wl,
+)
 from .patterns import (
     detect_candlestick_patterns,
     detect_indicator_signals,
@@ -184,6 +187,92 @@ class BacktestState:
 
 
 BT_STATE = BacktestState()
+
+
+# ============================================================
+# 形态观察状态 (K型回测观察)
+# ============================================================
+class ObserveState:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.running = False
+        self.stop_requested = False
+        self.started_at: float | None = None
+        self.finished_at: float | None = None
+        self.message = "idle"
+        self.error: str | None = None
+        self.params: dict = {}
+        self.progress: dict = {"total": 0, "scanned": 0, "events": 0}
+        self.result_file: str | None = None
+        self.stats: dict = {}
+        self.events: list = []
+
+    def reset(self, params):
+        with self.lock:
+            self.running = True
+            self.stop_requested = False
+            self.started_at = time.time()
+            self.finished_at = None
+            self.message = "观察启动..."
+            self.error = None
+            self.params = params
+            self.progress = {"total": 0, "scanned": 0, "events": 0}
+            self.result_file = None
+            self.stats = {}
+            self.events = []
+
+    def update_message(self, msg: str):
+        with self.lock:
+            self.message = msg
+
+    def update_progress(self, prog: dict):
+        with self.lock:
+            self.progress = prog
+            self.message = (f"观察中 {prog['scanned']}/{prog['total']}  "
+                            f"事件 {prog['events']}  失败 {prog.get('fail', 0)}")
+
+    def finish(self, stats, events, result_file, error=None):
+        with self.lock:
+            self.running = False
+            self.finished_at = time.time()
+            self.stats = stats
+            self.events = events
+            self.result_file = result_file
+            self.error = error
+            self.message = "完成" if error is None else "失败"
+
+    def request_stop(self):
+        with self.lock:
+            self.stop_requested = True
+
+    def is_stop_requested(self) -> bool:
+        with self.lock:
+            return self.stop_requested
+
+    def to_dict(self, include_events: bool = False) -> dict:
+        with self.lock:
+            elapsed = None
+            if self.started_at:
+                end = self.finished_at or time.time()
+                elapsed = round(end - self.started_at, 1)
+            d = {
+                "running": self.running,
+                "stop_requested": self.stop_requested,
+                "message": self.message,
+                "error": self.error,
+                "params": self.params,
+                "progress": self.progress,
+                "elapsed_sec": elapsed,
+                "stats": self.stats,
+                "event_count": len(self.events),
+                "result_file": self.result_file,
+            }
+            if include_events:
+                d["events"] = self.events
+            return d
+
+
+OB_STATE = ObserveState()
 
 
 # ============================================================
@@ -669,6 +758,173 @@ def get_realtime(codes: str):
     code_list = [c.strip().zfill(6) for c in codes.split(",") if c.strip()]
     return {"quotes": realtime.get_quotes(code_list),
             "trading_hours": realtime.is_trading_hours()}
+
+
+# ============================================================
+# 形态观察 (K型回测观察)
+# ============================================================
+def _run_observe_background(params: dict):
+    from datetime import date
+    from . import watchlist as wl_mod
+
+    OB_STATE.reset(params)
+    try:
+        OB_STATE.update_message("加载股票池...")
+        pattern_name = params.get("pattern")
+        if not pattern_name:
+            raise ValueError("缺少 pattern 参数")
+        lookback_days = int(params.get("lookback_days", 250))
+        horizons = params.get("horizons") or [5, 10, 20, 40, 60, 120]
+        horizons = [int(h) for h in horizons]
+        scope = params.get("scope", "all")  # all / scan_hits / watchlist / custom
+        codes_str = params.get("codes", "").strip()
+        max_workers = int(params.get("workers",
+                                     _CFG.get("runtime", {}).get("max_workers", 3)))
+
+        # 决定股票池
+        names_map: dict = {}
+        if scope == "custom" and codes_str:
+            codes = [c.strip().zfill(6) for c in codes_str.split(",") if c.strip()]
+            try:
+                df_all = data_loader.get_stock_list(
+                    exclude_st=False,
+                    cache_dir=_CFG["data"].get("cache_dir", "cache"),
+                )
+                names_map = dict(zip(df_all["code"], df_all["name"]))
+            except Exception:
+                pass
+        elif scope == "watchlist":
+            items = wl_mod.load_all()
+            codes = [it["code"] for it in items]
+            names_map = {it["code"]: it.get("name", "") for it in items}
+        elif scope == "scan_hits":
+            reports_dir = _CFG["output"].get("reports_dir", "output/reports")
+            latest = storage.load_latest(reports_dir)
+            if latest is None:
+                raise ValueError("无最近扫描结果, 请先扫描一次")
+            codes = [r["code"] for r in latest.get("results", [])]
+            names_map = {r["code"]: r.get("name", "") for r in latest.get("results", [])}
+        else:  # all
+            df_all = data_loader.get_stock_list(
+                exclude_chinext_star=_CFG["universe"].get("exclude_chinext_star", False),
+                exclude_st=_CFG["universe"].get("exclude_st", True),
+                cache_dir=_CFG["data"].get("cache_dir", "cache"),
+            )
+            limit = int(params.get("limit", 0))
+            if limit > 0:
+                df_all = df_all.head(limit)
+            codes = df_all["code"].tolist()
+            names_map = dict(zip(df_all["code"], df_all["name"]))
+
+        if not codes:
+            raise ValueError("股票池为空")
+
+        OB_STATE.update_message(f"观察 {len(codes)} 只股票...")
+
+        # 扫描期间暂停预拉,避免抢资源
+        prefetcher.pause()
+
+        result = pattern_observer.observe_pattern(
+            pattern_name=pattern_name,
+            codes=codes,
+            names=names_map,
+            lookback_days=lookback_days,
+            horizons=horizons,
+            adjust=_CFG["data"].get("adjust", "qfq"),
+            cache_dir=_CFG["data"].get("cache_dir", "cache"),
+            cache_ttl_hours=24,
+            workers=max_workers,
+            on_progress=OB_STATE.update_progress,
+            stop_flag=OB_STATE.is_stop_requested,
+        )
+
+        # 持久化到 data/output/observations/
+        from datetime import datetime as _dt
+        obs_dir = Path(_CFG["output"].get("reports_dir", "output/reports"))
+        if not obs_dir.is_absolute():
+            obs_dir = project_path(str(obs_dir))
+        obs_dir = obs_dir.parent / "observations"
+        obs_dir.mkdir(parents=True, exist_ok=True)
+        stamp = _dt.now().strftime("%Y%m%d_%H%M%S")
+        result_file = obs_dir / f"observe_{pattern_name}_{stamp}.json"
+        import json
+        result_file.write_text(json.dumps(result, ensure_ascii=False, indent=2),
+                               encoding="utf-8")
+
+        OB_STATE.finish(
+            stats=result.get("stats", {}),
+            events=result.get("events", []),
+            result_file=result_file.name,
+        )
+    except Exception as e:
+        log.exception("观察失败")
+        OB_STATE.finish(stats={}, events=[], result_file=None, error=str(e))
+    finally:
+        prefetcher.resume()
+
+
+@app.post("/api/observe")
+def trigger_observe(payload: dict):
+    with OB_STATE.lock:
+        if OB_STATE.running:
+            raise HTTPException(409, "已有观察任务在运行")
+    if STATE.to_dict()["running"]:
+        raise HTTPException(409, "扫描正在运行,请等扫描完成")
+
+    t = threading.Thread(target=_run_observe_background, args=(payload,),
+                         daemon=True)
+    t.start()
+    return {"ok": True, "message": "已启动后台观察"}
+
+
+@app.get("/api/observe/status")
+def observe_status(include_events: bool = False):
+    return OB_STATE.to_dict(include_events=include_events)
+
+
+@app.post("/api/observe/stop")
+def observe_stop():
+    with OB_STATE.lock:
+        if not OB_STATE.running:
+            raise HTTPException(409, "当前没有运行中的观察")
+    OB_STATE.request_stop()
+    return {"ok": True}
+
+
+@app.get("/api/observe/list")
+def observe_list():
+    obs_dir = Path(_CFG["output"].get("reports_dir", "output/reports"))
+    if not obs_dir.is_absolute():
+        obs_dir = project_path(str(obs_dir))
+    obs_dir = obs_dir.parent / "observations"
+    if not obs_dir.exists():
+        return {"items": []}
+    items = []
+    for fp in sorted(obs_dir.glob("observe_*.json"), reverse=True):
+        items.append({
+            "file": fp.name,
+            "size_kb": round(fp.stat().st_size / 1024, 1),
+            "mtime": time.strftime("%Y-%m-%d %H:%M",
+                                   time.localtime(fp.stat().st_mtime)),
+        })
+    return {"items": items[:50]}
+
+
+@app.get("/api/observe/result/{filename}")
+def observe_result(filename: str):
+    if not filename.startswith("observe_") or not filename.endswith(".json"):
+        raise HTTPException(400, "非法文件名")
+    if "/" in filename or "\\" in filename or ".." in filename:
+        raise HTTPException(400, "非法文件名")
+    obs_dir = Path(_CFG["output"].get("reports_dir", "output/reports"))
+    if not obs_dir.is_absolute():
+        obs_dir = project_path(str(obs_dir))
+    obs_dir = obs_dir.parent / "observations"
+    fp = obs_dir / filename
+    if not fp.exists():
+        raise HTTPException(404, "文件不存在")
+    import json
+    return json.loads(fp.read_text(encoding="utf-8"))
 
 
 @app.get("/api/backtest/list")

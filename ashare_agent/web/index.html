@@ -492,6 +492,7 @@
       <span class="tab-badge" id="wlBadge" style="display:none">0</span>
       <span class="live-dot" id="wlLiveDot" style="display:none" title="自动刷新中"></span>
     </button>
+    <button class="tab" data-tab="observe">K型回测观察</button>
   </div>
 
   <!-- ========== Tab: 扫描 ========== -->
@@ -627,6 +628,86 @@
       切到其他 tab 会自动暂停轮询。在「扫描结果」表里点 <b style="color:var(--accent)">★</b> 可快速加入此列表。
     </div>
   </div><!-- /tab-watchlist -->
+
+  <!-- ========== Tab: K型回测观察 ========== -->
+  <div class="tab-pane" id="tab-observe">
+    <div class="toolbar" style="flex-wrap:wrap;gap:8px">
+      <label style="font-size:13px;color:var(--muted)">形态:</label>
+      <select id="obPattern"
+        style="background:var(--panel-2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 10px;font-size:13px;min-width:200px">
+        <option value="">加载中...</option>
+      </select>
+
+      <label style="font-size:13px;color:var(--muted)">回望:</label>
+      <select id="obLookback"
+        style="background:var(--panel-2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 10px;font-size:13px">
+        <option value="125">6 个月 (125 天)</option>
+        <option value="250" selected>1 年 (250 天)</option>
+        <option value="500">2 年 (500 天)</option>
+        <option value="750">3 年 (750 天)</option>
+      </select>
+
+      <label style="font-size:13px;color:var(--muted)">股票池:</label>
+      <select id="obScope"
+        style="background:var(--panel-2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 10px;font-size:13px">
+        <option value="scan_hits">本次扫描命中股 (快)</option>
+        <option value="watchlist">特别关注</option>
+        <option value="all" selected>全市场 (慢, 1-2h)</option>
+        <option value="custom">自定义代码</option>
+      </select>
+
+      <input id="obCodes" placeholder="代码 (逗号分隔)"
+        style="background:var(--panel-2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 10px;font-size:13px;width:200px;display:none"/>
+
+      <button id="obRun" style="background:var(--accent);color:#fff;border:none;border-radius:6px;padding:7px 14px;cursor:pointer;font-size:13px">开始观察</button>
+      <button id="obStop" style="display:none;background:var(--up);color:#fff;border:none;border-radius:6px;padding:7px 14px;cursor:pointer;font-size:13px">停止</button>
+      <select id="obHistory"
+        style="background:var(--panel-2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 10px;font-size:13px;margin-left:auto">
+        <option value="">查看历史观察 ▾</option>
+      </select>
+    </div>
+
+    <div class="grid summary" id="obSummary" style="display:none"></div>
+    <div id="obStatusBlock" style="display:none;background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:14px;margin-bottom:14px"></div>
+
+    <div id="obStatsBlock" style="display:none"></div>
+
+    <table id="obTable" style="display:none">
+      <colgroup>
+        <col style="width:80px"/>
+        <col style="width:110px"/>
+        <col style="width:100px"/>
+        <col style="width:80px"/>
+        <col style="width:60px"/>
+        <col style="width:70px"/>
+        <col style="width:70px"/>
+        <col style="width:70px"/>
+        <col style="width:70px"/>
+        <col style="width:70px"/>
+        <col style="width:70px"/>
+        <col style="width:80px"/>
+      </colgroup>
+      <thead><tr>
+        <th>代码</th><th>名称</th>
+        <th>触发日</th>
+        <th class="num">入场价</th>
+        <th class="num">得分</th>
+        <th class="num">5日%</th>
+        <th class="num">10日%</th>
+        <th class="num">20日%</th>
+        <th class="num">40日%</th>
+        <th class="num">60日%</th>
+        <th class="num">120日%</th>
+        <th>操作</th>
+      </tr></thead>
+      <tbody id="obTbody"></tbody>
+    </table>
+
+    <div id="obEmpty" class="empty" style="padding:60px 0;text-align:center;color:var(--muted)">
+      选一个形态 → 选回望期 → 点「开始观察」<br>
+      <span style="font-size:12px">系统会找出过去N天内每一次该形态的触发记录，并显示触发日后各时间窗的真实涨跌幅。</span>
+    </div>
+  </div><!-- /tab-observe -->
 </main>
 
 <div class="modal" id="modal" onclick="closeModal(event)">
@@ -1418,6 +1499,10 @@ function switchTab(name) {
   } else {
     stopAutoRefresh();   // 离开关注 tab 暂停轮询
   }
+
+  if (name === "observe") {
+    initObserveTab();
+  }
 }
 
 document.querySelectorAll(".tab").forEach(t => {
@@ -1663,6 +1748,199 @@ loadSignals = async function() {
   loadSnapshotList();
 };
 loadSnapshotList();
+
+// ============================================================
+// K型回测观察
+// ============================================================
+let OB_POLL = null;
+let OB_INITED = false;
+
+function initObserveTab() {
+  if (OB_INITED) return;
+  OB_INITED = true;
+
+  // 拉所有形态填充下拉
+  fetch("/api/patterns").then(r => r.json()).then(data => {
+    const sel = $("obPattern");
+    const all = [...(data.patterns||[]), ...(data.indicators||[])];
+    sel.innerHTML = '<option value="">— 选一个形态 —</option>' +
+      all.map(p =>
+        `<option value="${p.name}">${p.desc}${p.source==='custom'?' [custom]':''}</option>`
+      ).join("");
+  });
+
+  // 自定义代码框开关
+  $("obScope").addEventListener("change", () => {
+    $("obCodes").style.display = $("obScope").value === "custom" ? "" : "none";
+  });
+
+  $("obRun").addEventListener("click", runObserve);
+  $("obStop").addEventListener("click", stopObserve);
+  $("obHistory").addEventListener("change", (e) => {
+    if (e.target.value) loadHistoricalObserve(e.target.value);
+  });
+
+  // 初始拉一次状态(如果有正在跑的)
+  refreshObserveStatus();
+  // 加载历史观察列表
+  loadObserveList();
+}
+
+async function loadObserveList() {
+  try {
+    const r = await fetch("/api/observe/list");
+    const data = await r.json();
+    const sel = $("obHistory");
+    sel.innerHTML = '<option value="">查看历史观察 ▾</option>' +
+      (data.items||[]).map(it =>
+        `<option value="${it.file}">${it.mtime} · ${it.file.replace('observe_','').replace('.json','')}</option>`
+      ).join("");
+  } catch (e) {}
+}
+
+async function runObserve() {
+  const pattern = $("obPattern").value;
+  if (!pattern) { alert("请选择一个形态"); return; }
+  const params = {
+    pattern,
+    lookback_days: parseInt($("obLookback").value, 10),
+    scope: $("obScope").value,
+    codes: $("obCodes").value.trim(),
+    horizons: [5, 10, 20, 40, 60, 120],
+  };
+  try {
+    const r = await fetch("/api/observe", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(params),
+    });
+    if (!r.ok) {
+      alert((await r.json()).detail || "启动失败");
+      return;
+    }
+    $("obRun").disabled = true;
+    $("obStop").style.display = "inline-block";
+    $("obStatusBlock").style.display = "";
+    $("obEmpty").style.display = "none";
+    startObservePolling();
+  } catch (e) { alert("启动失败: " + e); }
+}
+
+async function stopObserve() {
+  if (!confirm("确定停止? 已扫到的命中会保留。")) return;
+  $("obStop").disabled = true;
+  await fetch("/api/observe/stop", { method: "POST" });
+}
+
+function startObservePolling() {
+  if (OB_POLL) clearInterval(OB_POLL);
+  OB_POLL = setInterval(refreshObserveStatus, 2000);
+  refreshObserveStatus();
+}
+
+async function refreshObserveStatus() {
+  try {
+    const r = await fetch("/api/observe/status?include_events=true");
+    const s = await r.json();
+    renderObserveStatus(s);
+    if (!s.running && OB_POLL) {
+      clearInterval(OB_POLL); OB_POLL = null;
+      $("obRun").disabled = false;
+      $("obStop").style.display = "none";
+      $("obStop").disabled = false;
+      loadObserveList();   // 完成后刷新历史
+    }
+  } catch (e) {}
+}
+
+function renderObserveStatus(s) {
+  if (s.running) {
+    const elapsed = s.elapsed_sec ? ` (${Math.round(s.elapsed_sec)}s)` : '';
+    $("obStatusBlock").style.display = "";
+    $("obStatusBlock").innerHTML =
+      '<div style="display:flex;align-items:center;gap:10px">' +
+      '<div class="spinner" style="width:20px;height:20px;border-width:2px"></div>' +
+      `<div>${s.message}${elapsed}</div></div>`;
+  } else if (s.error) {
+    $("obStatusBlock").style.display = "";
+    $("obStatusBlock").innerHTML = `<div style="color:var(--up)">失败: ${s.error}</div>`;
+  } else if (s.event_count !== undefined && (s.event_count > 0 || s.events)) {
+    // 完成,渲染结果
+    $("obStatusBlock").style.display = "";
+    const elapsed = s.elapsed_sec ? `${Math.round(s.elapsed_sec)}s` : '';
+    $("obStatusBlock").innerHTML =
+      `<div>✔ ${s.message} · 耗时 ${elapsed} · 命中事件 <b style="color:var(--accent)">${s.event_count}</b> 条</div>`;
+    renderObserveStats(s.stats);
+    renderObserveTable(s.events || []);
+  } else if (s.message && s.message !== "idle") {
+    $("obStatusBlock").style.display = "";
+    $("obStatusBlock").innerHTML = `<div style="color:var(--muted)">${s.message}</div>`;
+  }
+}
+
+function renderObserveStats(stats) {
+  if (!stats || !stats.horizons) { $("obStatsBlock").style.display = "none"; return; }
+  const blocks = Object.keys(stats.horizons).sort((a,b)=>+a-+b).map(h => {
+    const s = stats.horizons[h];
+    if (!s.count) return "";
+    const cls = (v) => v > 0 ? "up" : (v < 0 ? "down" : "");
+    const fmt = (v) => (v >= 0 ? "+" : "") + v + "%";
+    return `<div class="card">
+      <div class="label">${h} 日后</div>
+      <div class="value">胜率 ${s.win_rate}%</div>
+      <div style="margin-top:4px;font-size:12px">
+        <span class="${cls(s.avg_return)}">均 ${fmt(s.avg_return)}</span> /
+        <span class="${cls(s.median)}">中 ${fmt(s.median)}</span>
+      </div>
+    </div>`;
+  }).filter(x=>x).join("");
+  $("obStatsBlock").innerHTML = '<h3 style="margin:14px 0 8px;font-size:14px;color:var(--accent)">各时间窗汇总</h3>' +
+    '<div class="grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px">' + blocks + '</div>';
+  $("obStatsBlock").style.display = "";
+}
+
+function renderObserveTable(events) {
+  if (!events || !events.length) {
+    $("obTable").style.display = "none";
+    return;
+  }
+  // 按触发日倒序
+  const sorted = [...events].sort((a, b) => b.signal_date.localeCompare(a.signal_date));
+  const tbody = $("obTbody");
+  const fmtR = (v) => {
+    if (v === null || v === undefined) return '<td class="num">—</td>';
+    const cls = v > 0 ? "up" : (v < 0 ? "down" : "");
+    return `<td class="num ${cls}">${v >= 0 ? "+" : ""}${v.toFixed(2)}</td>`;
+  };
+  tbody.innerHTML = sorted.map(e => {
+    const r = e.returns || {};
+    const nameEsc = (e.name || "").replace(/'/g, "\\'");
+    return `<tr>
+      <td class="code">${e.code}</td>
+      <td title="${e.name || ""}">${e.name || ""}</td>
+      <td>${e.signal_date}</td>
+      <td class="num">${e.entry_price}</td>
+      <td class="num">${e.score}</td>
+      ${fmtR(r['5'])}${fmtR(r['10'])}${fmtR(r['20'])}
+      ${fmtR(r['40'])}${fmtR(r['60'])}${fmtR(r['120'])}
+      <td><a href="#" class="action-link" onclick="openChart('${e.code}','${nameEsc}');return false;">K线</a></td>
+    </tr>`;
+  }).join("");
+  $("obTable").style.display = "";
+}
+
+async function loadHistoricalObserve(filename) {
+  try {
+    const r = await fetch("/api/observe/result/" + filename);
+    if (!r.ok) { alert((await r.json()).detail || "加载失败"); return; }
+    const data = await r.json();
+    $("obStatusBlock").style.display = "";
+    $("obStatusBlock").innerHTML =
+      `<div>📄 历史观察: ${data.pattern_desc} · 回望 ${data.lookback_days} 天 · ${data.events.length} 条事件</div>`;
+    renderObserveStats(data.stats);
+    renderObserveTable(data.events);
+  } catch (e) { alert("加载失败: " + e); }
+}
 
 // 启动时:刷新 badge + 初始化自动刷新按钮 UI
 updateAutoBtnUI();
