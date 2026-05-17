@@ -185,9 +185,34 @@
     border-radius: 8px; overflow: hidden;
   }
   th, td {
-    padding: 9px 12px; text-align: left;
+    padding: 8px 10px; text-align: left;
     border-bottom: 1px solid var(--border);
   }
+
+  /* ===== 扫描结果表 - 固定列宽,长形态名允许换行 ===== */
+  #tbl { table-layout: fixed; }
+  #tbl th, #tbl td { padding: 7px 8px; vertical-align: middle; }
+  #tbl col.col-check    { width: 30px; }
+  #tbl col.col-code     { width: 64px; }
+  #tbl col.col-name     { width: 88px; }
+  #tbl col.col-close    { width: 70px; }
+  #tbl col.col-chg      { width: 64px; }
+  #tbl col.col-short    { width: 60px; }   /* 5/15/30 日% */
+  #tbl col.col-score    { width: 48px; }
+  #tbl col.col-pattern  { width: auto; }   /* 自适应剩余空间 */
+  #tbl col.col-action   { width: 130px; }
+  /* 代码列等宽字体 */
+  #tbl td.code { font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+  /* 名称列单行截断,鼠标悬停看完整 */
+  #tbl td:nth-child(3) {
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  /* 形态/指标列允许换行 badge */
+  #tbl td:nth-child(10), #tbl td:nth-child(11) {
+    white-space: normal; word-break: break-all; line-height: 1.6;
+  }
+  /* badge 紧凑一点,避免占太多空间 */
+  #tbl .badge { font-size: 10px; padding: 1px 6px; margin: 1px 2px 1px 0; }
   th {
     background: var(--panel-2); color: var(--muted);
     font-weight: 500; font-size: 12px;
@@ -528,6 +553,20 @@
   </div>
 
   <table id="tbl" style="margin-top:14px">
+    <colgroup>
+      <col class="col-check"/>
+      <col class="col-code"/>
+      <col class="col-name"/>
+      <col class="col-close"/>
+      <col class="col-chg"/>
+      <col class="col-short"/>
+      <col class="col-short"/>
+      <col class="col-short"/>
+      <col class="col-score"/>
+      <col class="col-pattern"/>
+      <col class="col-pattern"/>
+      <col class="col-action"/>
+    </colgroup>
     <thead>
       <tr>
         <th class="check-col"><input type="checkbox" id="selAll" /></th>
@@ -889,7 +928,7 @@ function renderTable() {
     return `<tr class="${rowCls}">
       <td class="check-col"><input type="checkbox" class="rowSel" data-code="${r.code}" ${checked}/></td>
       <td class="code">${r.code}</td>
-      <td>${r.name || ""}</td>
+      <td title="${r.name || ""}">${r.name || ""}</td>
       <td class="num">${fmt2(r.close)}</td>
       <td class="num ${chgCls}">${r.chg_pct > 0 ? "+" : ""}${fmt2(r.chg_pct)}</td>
       ${fmtChg(r.chg_5d)}
