@@ -15,6 +15,19 @@ try:
 except ImportError:  # 允许在没装包的环境中 import 模块本身
     ak = None  # type: ignore
 
+# 给 requests 全局加默认 timeout, 避免 akshare 内部 HTTP 调用无超时挂死
+# (akshare 多处用 requests.get 没传 timeout, 网络抖动时会 hang 几分钟)
+try:
+    import requests as _rq  # type: ignore
+    _DEFAULT_HTTP_TIMEOUT = 30   # 秒
+    _orig_session_request = _rq.Session.request
+    def _session_request_with_timeout(self, *args, **kwargs):  # type: ignore
+        kwargs.setdefault("timeout", _DEFAULT_HTTP_TIMEOUT)
+        return _orig_session_request(self, *args, **kwargs)
+    _rq.Session.request = _session_request_with_timeout  # type: ignore
+except Exception:  # noqa
+    pass
+
 from .utils import ensure_dir, project_path
 
 log = logging.getLogger("ashare_agent")

@@ -24,6 +24,12 @@
     background: var(--bg); color: var(--text);
     font-size: 14px;
   }
+  /* main 宽度限制 95vw,大屏自动居中;header 保持全宽 (背景延伸到边缘) */
+  main { max-width: 95vw; margin: 0 auto; box-sizing: border-box; }
+  @media (max-width: 1024px) {
+    main { max-width: 100vw; }
+  }
+
   header {
     display: flex; align-items: center; justify-content: space-between;
     padding: 14px 24px; background: var(--panel);

@@ -90,6 +90,10 @@ class ScanState:
             if message is not None:
                 self.message = message
 
+    def update_message(self, message: str):
+        with self.lock:
+            self.message = message
+
     def finish(self, message: str, error: str | None = None):
         with self.lock:
             self.running = False
@@ -187,6 +191,10 @@ BT_STATE = BacktestState()
 # ============================================================
 def _run_scan_background(cfg: dict):
     STATE.reset()
+    # 扫描启动时给用户友好提示 (这一步可能耗时 5-30 秒)
+    STATE.update_message("加载股票列表 (首次较慢, ≤ 90 秒)...")
+    # 暂停后台预拉,把 akshare 连接全留给扫描
+    prefetcher.pause()
 
     def on_result(row):
         # 用 storage 里的英文 key 序列化,前端表格直接消费
@@ -223,6 +231,9 @@ def _run_scan_background(cfg: dict):
     except Exception as e:
         log.exception("扫描失败")
         STATE.finish("扫描失败", error=str(e))
+    finally:
+        # 扫描结束后恢复后台预拉
+        prefetcher.resume()
 
 
 # ============================================================
