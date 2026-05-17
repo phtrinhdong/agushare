@@ -98,6 +98,16 @@ schedule:
   # 时区
   timezone: "Asia/Shanghai"
 
+# ---------- 后台预拉 (新功能,默认开) ----------
+# 持续在后台低速率拉取 K 线写入缓存,这样扫描时几乎无网络等待。
+# 缓存仍然 6h TTL,只是预拉会把它们提前刷新好。
+prefetch:
+  enabled: true
+  scope: "all"              # all / watchlist / signals (上次扫到的命中)
+  rate_per_min: 30          # 每分钟最多拉几只 (30 ≈ 每 2 秒 1 只)
+  cache_ttl_hours: 6        # 新鲜阈值,小于该值的会被跳过
+  pause_during_trading: false  # true = 9:25-15:05 暂停 (避免和实时行情抢带宽)
+
 # ---------- 并发 / 日志 ----------
 runtime:
   # 并发线程数 — akshare 上游 (东方财富) 对突发并发敏感:

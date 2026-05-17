@@ -142,7 +142,7 @@ def _head_html() -> str:
     font-variant-numeric: tabular-nums; white-space: nowrap; }
   th { background: var(--panel-2); color: var(--muted); font-weight: 500;
     font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
-  td.num { text-align: right; }
+  th.num, td.num { text-align: right; }
   td.up { color: var(--up); } td.down { color: var(--down); }
   tbody tr:hover { background: rgba(79, 140, 255, 0.06); }
 
@@ -231,11 +231,12 @@ def _pattern_table_html(by_pattern: dict) -> str:
     return f"""<h2>按形态/指标分组</h2>
 <table>
   <thead><tr>
-    <th>形态</th><th>命中数</th><th>胜率</th>
-    <th>平均收益</th><th>中位收益</th>
-    <th>最大盈</th><th>最大亏</th>
-    <th>盈亏比</th><th>持有日</th>
-    <th>止损/止盈触发</th>
+    <th>形态</th>
+    <th class="num">命中数</th><th class="num">胜率</th>
+    <th class="num">平均收益</th><th class="num">中位收益</th>
+    <th class="num">最大盈</th><th class="num">最大亏</th>
+    <th class="num">盈亏比</th><th class="num">持有日</th>
+    <th class="num">止损/止盈触发</th>
   </tr></thead>
   <tbody>{''.join(rows)}</tbody>
 </table>
@@ -272,7 +273,9 @@ def _trades_table_html(trades: list, limit: int = 200) -> str:
 <table>
   <thead><tr>
     <th>入场日</th><th>代码</th><th>名称</th><th>形态</th>
-    <th>入场价</th><th>出场价</th><th>持有日</th><th>收益</th><th>出场方式</th>
+    <th class="num">入场价</th><th class="num">出场价</th>
+    <th class="num">持有日</th><th class="num">收益</th>
+    <th>出场方式</th>
   </tr></thead>
   <tbody>{''.join(rows)}</tbody>
 </table>

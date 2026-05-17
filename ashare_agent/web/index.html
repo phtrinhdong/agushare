@@ -394,8 +394,11 @@
     white-space: nowrap;
   }
   .wl-table th { background: var(--panel-2); color: var(--muted);
-    font-size: 11px; text-transform: uppercase; font-weight: 500; }
-  .wl-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
+    font-size: 11px; text-transform: uppercase; font-weight: 500;
+    text-align: left; }
+  .wl-table th.num, .wl-table td.num {
+    text-align: right; font-variant-numeric: tabular-nums;
+  }
   .wl-table .live { color: var(--accent); font-weight: 600; }
   .wl-table .price-flash-up { animation: flash-up 0.6s ease-out; }
   .wl-table .price-flash-down { animation: flash-down 0.6s ease-out; }
@@ -498,6 +501,9 @@
     <button id="btnStop" style="display:none;background:var(--up);color:#fff;border:none;border-radius:6px;padding:7px 14px;cursor:pointer">停止扫描</button>
     <button id="btnBacktest" class="secondary">回测</button>
     <button id="btnRefresh" class="secondary">刷新数据</button>
+    <select id="historySelect" style="background:var(--panel-2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 10px;font-size:13px">
+      <option value="">历史快照...</option>
+    </select>
     <span class="status" id="status"><span class="dot"></span><span id="statusText">就绪</span></span>
   </div>
 
@@ -1448,8 +1454,10 @@ function renderWatchlist(data) {
   $("wlTableContainer").innerHTML = `
     <table class="wl-table">
       <thead><tr>
-        <th>代码</th><th>名称</th><th>现价</th><th>涨跌%</th>
-        <th>成本价</th><th>数量</th><th>盈亏%</th><th>盈亏额</th><th>市值</th>
+        <th>代码</th><th>名称</th>
+        <th class="num">现价</th><th class="num">涨跌%</th>
+        <th class="num">成本价</th><th class="num">数量</th>
+        <th class="num">盈亏%</th><th class="num">盈亏额</th><th class="num">市值</th>
         <th>操作</th>
       </tr></thead>
       <tbody>${rows}</tbody>
@@ -1499,6 +1507,54 @@ function quickAddWatchlist(code, name) {
     setTimeout(() => $(id).style.borderColor = "", 1500);
   });
 }
+
+// ============================================================
+// 历史扫描快照
+// ============================================================
+async function loadSnapshotList() {
+  try {
+    const r = await fetch("/api/snapshots");
+    const data = await r.json();
+    const sel = $("historySelect");
+    sel.innerHTML = '<option value="">查看历史快照 ▾</option>' +
+      (data.items || []).map(it =>
+        `<option value="${it.file}">${(it.scanned_at || "").replace("T", " ").slice(0, 16)} · ${it.count} 只命中</option>`
+      ).join("");
+  } catch (e) { /* ignore */ }
+}
+
+async function loadHistoricalSnapshot(filename) {
+  if (!filename) return;
+  try {
+    const r = await fetch("/api/snapshots/" + filename);
+    if (!r.ok) {
+      alert((await r.json()).detail || "加载失败");
+      return;
+    }
+    const data = await r.json();
+    DATA = data;
+    LIVE_MODE = false;
+    $("lastUpdate").textContent =
+      "查看历史快照: " + (data.scanned_at || "").replace("T", " ").slice(0, 16);
+    $("cardCount").textContent = data.count || 0;
+    const maxScore = (data.results || []).reduce((m, r) => Math.max(m, r.score || 0), 0);
+    $("cardMaxScore").textContent = maxScore || "—";
+    refreshPatternFilter(data.results || []);
+    renderTable();
+  } catch (e) { alert("加载历史快照失败: " + e); }
+}
+
+$("historySelect").addEventListener("change", (e) => {
+  loadHistoricalSnapshot(e.target.value);
+});
+
+// 扫描完成后刷新历史列表 (用户能立刻看到刚结束的扫描)
+const _origLoadSignals = loadSignals;
+loadSignals = async function() {
+  await _origLoadSignals();
+  loadSnapshotList();
+};
+loadSnapshotList();
 
 // 启动时:刷新 badge + 初始化自动刷新按钮 UI
 updateAutoBtnUI();

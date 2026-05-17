@@ -27,7 +27,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 
-from . import data_loader, realtime, reporter, storage, visualizer, watchlist as wl
+from . import data_loader, prefetcher, realtime, reporter, storage, visualizer, watchlist as wl
 from .patterns import (
     detect_candlestick_patterns,
     detect_indicator_signals,
@@ -280,6 +280,33 @@ def _startup():
     log.info("Web 服务启动,已加载 %d 个形态 + %d 个指标 (auth=%s)",
              len(list_all()["patterns"]), len(list_all()["indicators"]),
              "ON" if _AUTH_ENABLED else "OFF")
+    # 启动后台预拉 (按 config.yaml > prefetch.enabled)
+    prefetcher.start(_CFG)
+
+
+@app.on_event("shutdown")
+def _shutdown():
+    prefetcher.stop()
+
+
+# ============================================================
+# 后台预拉状态 + 控制
+# ============================================================
+@app.get("/api/prefetch/status")
+def prefetch_status():
+    return prefetcher.STATE.snapshot()
+
+
+@app.post("/api/prefetch/pause")
+def prefetch_pause():
+    prefetcher.pause()
+    return {"ok": True}
+
+
+@app.post("/api/prefetch/resume")
+def prefetch_resume():
+    prefetcher.resume()
+    return {"ok": True}
 
 
 # 健康检查 — 不走 auth (Docker / Caddy / 负载均衡用)
@@ -347,6 +374,23 @@ def stop_scan():
 def list_snapshots():
     reports_dir = _CFG["output"].get("reports_dir", "output/reports")
     return {"items": storage.list_snapshots(reports_dir)}
+
+
+@app.get("/api/snapshots/{filename}")
+def get_snapshot(filename: str):
+    """按文件名拿历史快照内容。安全: 仅允许 signals_*.json"""
+    if not filename.startswith("signals_") or not filename.endswith(".json"):
+        raise HTTPException(400, "非法文件名")
+    if "/" in filename or "\\" in filename or ".." in filename:
+        raise HTTPException(400, "非法文件名")
+    reports_dir = Path(_CFG["output"].get("reports_dir", "output/reports"))
+    if not reports_dir.is_absolute():
+        reports_dir = project_path(str(reports_dir))
+    fp = reports_dir / filename
+    if not fp.exists():
+        raise HTTPException(404, "快照不存在")
+    import json
+    return json.loads(fp.read_text(encoding="utf-8"))
 
 
 # ============================================================
