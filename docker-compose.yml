@@ -65,6 +65,9 @@ services:
       - -m
       - ashare_agent.main
       - schedule
+    # scheduler 不跑 web 服务,关闭从镜像继承的 healthcheck (避免 unhealthy 误报)
+    healthcheck:
+      disable: true
     depends_on:
       - web
 
