@@ -701,6 +701,8 @@ let LIVE_PREV_CODES = new Set();  // 上次轮询时已存在的代码,用于高
 let SELECTED = new Set();         // 选中的股票代码 (跨筛选/排序保留)
 let SELECTED_PATTERNS = new Set(); // 形态过滤多选 (按 desc 中文描述)
 let ALL_PATTERNS = { patterns: [], indicators: [] };  // 全部已注册形态(/api/patterns 缓存)
+// 增量渲染 DOM 缓存: code -> <tr> 元素
+const ROW_DOM = new Map();
 
 const $ = (id) => document.getElementById(id);
 const fmt2 = (n) => (typeof n === "number" ? n.toFixed(2) : n);
@@ -816,6 +818,95 @@ async function loadAllPatterns() {
 }
 loadAllPatterns();
 
+// ============================================================
+// 增量渲染 (避免每次轮询重建整个 tbody)
+// ============================================================
+function buildRowInnerHTML(r) {
+  const chgCls = r.chg_pct > 0 ? "up" : (r.chg_pct < 0 ? "down" : "");
+  const candles = (r.candlestick || []).map(c => `<span class="badge">${c}</span>`).join("");
+  const inds = (r.indicators || []).map(c => `<span class="badge indicator">${c}</span>`).join("");
+  const checked = SELECTED.has(r.code) ? "checked" : "";
+  const nameEsc = (r.name || "").replace(/'/g, "\\'");
+  const fmtChg = (v) => {
+    if (v === null || v === undefined) return '<td class="num">—</td>';
+    const cls = v > 0 ? "up" : (v < 0 ? "down" : "");
+    return `<td class="num ${cls}">${v > 0 ? "+" : ""}${v.toFixed(2)}</td>`;
+  };
+  return `<td class="check-col"><input type="checkbox" class="rowSel" data-code="${r.code}" ${checked}/></td>
+    <td class="code">${r.code}</td>
+    <td title="${r.name || ""}">${r.name || ""}</td>
+    <td class="num">${fmt2(r.close)}</td>
+    <td class="num ${chgCls}">${r.chg_pct > 0 ? "+" : ""}${fmt2(r.chg_pct)}</td>
+    ${fmtChg(r.chg_5d)}
+    ${fmtChg(r.chg_15d)}
+    ${fmtChg(r.chg_30d)}
+    <td class="score">${r.score}</td>
+    <td>${candles || "—"}</td>
+    <td>${inds || "—"}</td>
+    <td>
+      <a href="#" class="action-link" onclick="openChart('${r.code}','${nameEsc}');return false;">K线</a>
+      <a href="#" class="action-link" onclick="openBtModal('${r.code}');return false;">回测</a>
+      <a href="#" class="action-link" onclick="quickAddWatchlist('${r.code}','${nameEsc}');return false;" title="加入关注">★</a>
+    </td>`;
+}
+
+// 比较两行的可见字段, 决定是否需要重渲该行内容 (避免不必要的 DOM 改动)
+function rowDataSignature(r) {
+  return [
+    r.code, r.name, r.close, r.chg_pct, r.chg_5d, r.chg_15d, r.chg_30d, r.score,
+    (r.candlestick || []).join(","), (r.indicators || []).join(","),
+  ].join("|");
+}
+
+function diffRender(tbody, rows) {
+  const newCodes = new Set(rows.map(r => r.code));
+
+  // 1) 删除不再存在的行
+  for (const [code, info] of [...ROW_DOM.entries()]) {
+    if (!newCodes.has(code)) {
+      info.tr.remove();
+      ROW_DOM.delete(code);
+    }
+  }
+
+  // 2) 按目标顺序遍历: 添加新行 / 移动到正确位置 / 仅在数据变化时更新内容
+  let prev = null;
+  for (const r of rows) {
+    let info = ROW_DOM.get(r.code);
+    const sig = rowDataSignature(r);
+
+    if (!info) {
+      // 新行: 创建 + 插入
+      const tr = document.createElement("tr");
+      tr.innerHTML = buildRowInnerHTML(r);
+      if (LIVE_MODE) tr.classList.add("new-hit");  // 闪一下蓝色
+      info = { tr, sig };
+      ROW_DOM.set(r.code, info);
+    } else if (info.sig !== sig) {
+      // 已存在但数据变了 (实际很少): 重渲该行内容
+      info.tr.innerHTML = buildRowInnerHTML(r);
+      info.sig = sig;
+      // 不加 new-hit 避免误闪 (这只是数据更新,不是新行)
+    }
+    // 移动到正确位置 (DOM 不会执行多余 reflow,如果位置已经对了)
+    const expected = prev ? prev.nextElementSibling : tbody.firstChild;
+    if (info.tr !== expected) {
+      if (prev) prev.after(info.tr);
+      else tbody.prepend(info.tr);
+    }
+    prev = info.tr;
+  }
+
+  // LIVE_PREV_CODES 现在由 ROW_DOM 取代,但保留供其他地方引用
+  LIVE_PREV_CODES = new Set(ROW_DOM.keys());
+}
+
+// 切换股票数据集时 (历史快照 / 重新扫描),清空 DOM 缓存让下次走全量
+function resetRowDOM() {
+  ROW_DOM.clear();
+  $("tbody").innerHTML = "";
+}
+
 async function loadSignals() {
   const r = await fetch("/api/signals");
   const data = await r.json();
@@ -888,6 +979,7 @@ function renderTable() {
   const tbody = $("tbody");
   if (!rows.length) {
     tbody.innerHTML = "";
+    ROW_DOM.clear();
     const emptyEl = $("empty");
     if (LIVE_MODE) {
       emptyEl.innerHTML =
@@ -916,41 +1008,8 @@ function renderTable() {
   $("empty").style.display = "none";
   $("cardVisible").textContent = rows.length;
 
-  const currentCodes = new Set(rows.map(r => r.code));
-  tbody.innerHTML = rows.map(r => {
-    const chgCls = r.chg_pct > 0 ? "up" : (r.chg_pct < 0 ? "down" : "");
-    const candles = (r.candlestick || []).map(c => `<span class="badge">${c}</span>`).join("");
-    const inds = (r.indicators || []).map(c => `<span class="badge indicator">${c}</span>`).join("");
-    // 实时模式下,新出现的行加 flash 动画
-    const isNew = LIVE_MODE && !LIVE_PREV_CODES.has(r.code);
-    const rowCls = isNew ? "new-hit" : "";
-    const checked = SELECTED.has(r.code) ? "checked" : "";
-    const nameEsc = (r.name || "").replace(/'/g, "\\'");
-    const fmtChg = (v) => {
-      if (v === null || v === undefined) return '<td class="num">—</td>';
-      const cls = v > 0 ? "up" : (v < 0 ? "down" : "");
-      return `<td class="num ${cls}">${v > 0 ? "+" : ""}${v.toFixed(2)}</td>`;
-    };
-    return `<tr class="${rowCls}">
-      <td class="check-col"><input type="checkbox" class="rowSel" data-code="${r.code}" ${checked}/></td>
-      <td class="code">${r.code}</td>
-      <td title="${r.name || ""}">${r.name || ""}</td>
-      <td class="num">${fmt2(r.close)}</td>
-      <td class="num ${chgCls}">${r.chg_pct > 0 ? "+" : ""}${fmt2(r.chg_pct)}</td>
-      ${fmtChg(r.chg_5d)}
-      ${fmtChg(r.chg_15d)}
-      ${fmtChg(r.chg_30d)}
-      <td class="score">${r.score}</td>
-      <td>${candles || "—"}</td>
-      <td>${inds || "—"}</td>
-      <td>
-        <a href="#" class="action-link" onclick="openChart('${r.code}','${nameEsc}');return false;">K线</a>
-        <a href="#" class="action-link" onclick="openBtModal('${r.code}');return false;">回测</a>
-        <a href="#" class="action-link" onclick="quickAddWatchlist('${r.code}','${nameEsc}');return false;" title="加入关注">★</a>
-      </td>
-    </tr>`;
-  }).join("");
-  LIVE_PREV_CODES = currentCodes;
+  // ===== 增量渲染 =====
+  diffRender(tbody, rows);
   syncSelAllCheckbox();
 
   // 表头排序箭头
@@ -995,6 +1054,7 @@ async function triggerScan(watchlistOnly) {
   DATA = { results: [], scanned_at: null };
   LIVE_MODE = true;
   LIVE_PREV_CODES = new Set();
+  resetRowDOM();
   applyLiveStatus({
     running: true,
     message: "扫描启动中...",
@@ -1579,6 +1639,7 @@ async function loadHistoricalSnapshot(filename) {
     const data = await r.json();
     DATA = data;
     LIVE_MODE = false;
+    resetRowDOM();    // 切换数据集,清空旧 DOM 缓存
     $("lastUpdate").textContent =
       "查看历史快照: " + (data.scanned_at || "").replace("T", " ").slice(0, 16);
     $("cardCount").textContent = data.count || 0;
