@@ -631,6 +631,18 @@
 
   <!-- ========== Tab: K型回测观察 ========== -->
   <div class="tab-pane" id="tab-observe">
+
+    <!-- 历史数据库状态卡片 -->
+    <div id="historyPanel" style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:12px 14px;margin-bottom:14px">
+      <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+        <div style="font-weight:600;color:var(--accent)">📦 历史数据库</div>
+        <div id="historyStats" style="color:var(--muted);font-size:13px">加载中...</div>
+        <button id="hrRun" style="margin-left:auto;background:var(--down);color:#fff;border:none;border-radius:6px;padding:6px 12px;cursor:pointer;font-size:12px">一键更新 (推荐每周一次)</button>
+        <button id="hrStop" style="display:none;background:var(--up);color:#fff;border:none;border-radius:6px;padding:6px 12px;cursor:pointer;font-size:12px">停止刷新</button>
+      </div>
+      <div id="hrProgress" style="display:none;margin-top:10px;color:var(--muted);font-size:13px"></div>
+    </div>
+
     <div class="toolbar" style="flex-wrap:wrap;gap:8px">
       <label style="font-size:13px;color:var(--muted)">形态:</label>
       <select id="obPattern"
@@ -1784,6 +1796,112 @@ function initObserveTab() {
   refreshObserveStatus();
   // 加载历史观察列表
   loadObserveList();
+  // 历史数据库统计
+  refreshHistoryStats();
+
+  // 历史刷新按钮绑定
+  $("hrRun").addEventListener("click", runHistoryRefresh);
+  $("hrStop").addEventListener("click", stopHistoryRefresh);
+
+  // 如果刷新已经在跑,启动轮询
+  fetch("/api/history/refresh/status").then(r=>r.json()).then(s => {
+    if (s.running) {
+      $("hrRun").style.display = "none";
+      $("hrStop").style.display = "inline-block";
+      startHistoryPolling();
+    }
+  });
+}
+
+// ----- 历史数据库面板 -----
+let HR_POLL = null;
+
+async function refreshHistoryStats() {
+  try {
+    const r = await fetch("/api/history/stats");
+    const s = await r.json();
+    if (!s.total_files) {
+      $("historyStats").innerHTML =
+        '<span style="color:var(--warn)">未初始化</span> · 点右侧按钮拉取数据 (1-2 小时)';
+      return;
+    }
+    const age = s.avg_age_days;
+    const ageCls = age > 7 ? 'color:var(--up)' : (age > 3 ? 'color:var(--warn)' : 'color:var(--down)');
+    $("historyStats").innerHTML =
+      `${s.total_files} 只 · ${s.total_size_mb} MB · ` +
+      `<span style="${ageCls}">平均 ${age} 天前</span> · ` +
+      `最新 ${s.newest_days}天 · 最旧 ${s.oldest_days}天`;
+  } catch (e) {
+    $("historyStats").textContent = "加载失败";
+  }
+}
+
+async function runHistoryRefresh() {
+  if (!confirm("将批量更新全市场历史数据,预计 1-2 小时。\n7 天内已更新过的会跳过 (除非选 force)。\n确定开始?")) return;
+  try {
+    const r = await fetch("/api/history/refresh", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ bars: 800, scope: "all", force: false }),
+    });
+    if (!r.ok) {
+      alert((await r.json()).detail || "启动失败");
+      return;
+    }
+    $("hrRun").style.display = "none";
+    $("hrStop").style.display = "inline-block";
+    $("hrProgress").style.display = "";
+    startHistoryPolling();
+  } catch (e) { alert("启动失败: " + e); }
+}
+
+async function stopHistoryRefresh() {
+  if (!confirm("确定停止? 已经更新的会保留。")) return;
+  $("hrStop").disabled = true;
+  await fetch("/api/history/refresh/stop", { method: "POST" });
+}
+
+function startHistoryPolling() {
+  if (HR_POLL) clearInterval(HR_POLL);
+  HR_POLL = setInterval(async () => {
+    try {
+      const r = await fetch("/api/history/refresh/status");
+      const s = await r.json();
+      renderHistoryProgress(s);
+      if (!s.running) {
+        clearInterval(HR_POLL); HR_POLL = null;
+        $("hrRun").style.display = "inline-block";
+        $("hrStop").style.display = "none";
+        $("hrStop").disabled = false;
+        refreshHistoryStats();
+      }
+    } catch (e) {}
+  }, 2000);
+}
+
+function renderHistoryProgress(s) {
+  if (!s.running && !s.summary && !s.error) {
+    $("hrProgress").style.display = "none";
+    return;
+  }
+  $("hrProgress").style.display = "";
+  if (s.error) {
+    $("hrProgress").innerHTML = `<span style="color:var(--up)">失败: ${s.error}</span>`;
+    return;
+  }
+  if (s.running) {
+    const p = s.progress || {};
+    const pct = p.total ? (p.scanned / p.total * 100).toFixed(1) : 0;
+    const elapsed = s.elapsed_sec ? `${Math.round(s.elapsed_sec)}s` : '';
+    $("hrProgress").innerHTML =
+      `<div style="display:flex;align-items:center;gap:8px">` +
+      `<div class="spinner" style="width:16px;height:16px;border-width:2px"></div>` +
+      `<div>${s.message} · ${pct}% · 耗时 ${elapsed}</div></div>`;
+  } else if (s.summary) {
+    const sm = s.summary;
+    $("hrProgress").innerHTML =
+      `<span style="color:var(--down)">✔ 完成: 新拉 ${sm.ok} · 跳过 ${sm.skipped} · 失败 ${sm.fail}</span>`;
+  }
 }
 
 async function loadObserveList() {

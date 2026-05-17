@@ -34,7 +34,7 @@ from typing import Callable
 import pandas as pd
 from tqdm import tqdm
 
-from . import data_loader
+from . import data_loader, history_cache
 from .patterns.registry import PATTERN_REGISTRY, INDICATOR_REGISTRY
 
 log = logging.getLogger("ashare_agent")
@@ -140,17 +140,25 @@ def observe_pattern(
 
     all_events: list[dict] = []
     failed_codes: list[str] = []
+    from_history = 0
+    from_network = 0
 
     def _job(code: str):
-        df = data_loader.fetch_kline(
-            code, bars=bars_needed, adjust=adjust,
-            cache_dir=cache_dir, cache_ttl_hours=cache_ttl_hours,
-        )
+        nonlocal from_history, from_network
+        # 优先用历史数据库 (深度缓存,通常是手动批量更新好的)
+        df = history_cache.load(code, adjust=adjust, min_bars=bars_needed)
+        used_history = df is not None
+        if df is None:
+            # 历史库没有 → 退回到走 fetch_kline (会用短期 cache 或拉网络)
+            df = data_loader.fetch_kline(
+                code, bars=bars_needed, adjust=adjust,
+                cache_dir=cache_dir, cache_ttl_hours=cache_ttl_hours,
+            )
         if df is None or df.empty:
-            return code, None, "no_data"
+            return code, None, "no_data", used_history
         events = _observe_one_stock(code, names.get(code, code), df,
                                     pattern, lookback_days, horizons)
-        return code, events, "ok"
+        return code, events, "ok", used_history
 
     total = len(codes)
     scanned = 0
@@ -167,7 +175,7 @@ def observe_pattern(
                 log.info("观察收到停止信号")
                 break
             try:
-                code, events, status = fut.result()
+                code, events, status, used_hist = fut.result()
             except Exception as e:
                 log.debug("观察异常 %s: %s", futures[fut], e)
                 failed_codes.append(futures[fut])
@@ -178,6 +186,10 @@ def observe_pattern(
                 failed_codes.append(code)
             else:
                 ok_cnt += 1
+                if used_hist:
+                    from_history += 1
+                else:
+                    from_network += 1
                 if events:
                     all_events.extend(events)
             scanned += 1
@@ -190,12 +202,14 @@ def observe_pattern(
                         "ok": ok_cnt,
                         "fail": len(failed_codes),
                         "events": len(all_events),
+                        "from_history": from_history,
+                        "from_network": from_network,
                     })
                 except Exception:
                     pass
 
-    log.info("观察完成: 处理 %d 只, 命中事件 %d 条",
-             scanned, len(all_events))
+    log.info("观察完成: 处理 %d 只 (历史库 %d / 网络 %d), 事件 %d 条",
+             scanned, from_history, from_network, len(all_events))
 
     return {
         "pattern": pattern_name,
@@ -205,6 +219,10 @@ def observe_pattern(
         "events": all_events,
         "stats": _aggregate(all_events, horizons),
         "failed_codes": failed_codes,
+        "source_summary": {
+            "from_history": from_history,
+            "from_network": from_network,
+        },
     }
 
 

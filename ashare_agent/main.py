@@ -214,7 +214,57 @@ def build_parser() -> argparse.ArgumentParser:
                       help="并发数 (默认读 config.yaml)")
     p_bt.set_defaults(func=cmd_backtest)
 
+    p_hist = sub.add_parser("refresh-history", help="批量刷新历史数据库 (深度 K 线缓存)")
+    p_hist.add_argument("--bars", type=int, default=800,
+                        help="每只股票拉取的 K 线根数 (默认 800 ≈ 3.2 年)")
+    p_hist.add_argument("--codes", default=None,
+                        help="只刷这些代码 (逗号分隔)")
+    p_hist.add_argument("--workers", type=int, default=None)
+    p_hist.add_argument("--force", action="store_true",
+                        help="强制刷新 (忽略 7 天 TTL,所有都重拉)")
+    p_hist.set_defaults(func=cmd_refresh_history)
+
     return p
+
+
+def cmd_refresh_history(args: argparse.Namespace) -> int:
+    from . import history_cache
+    from .data_loader import get_stock_list
+
+    cfg = load_config(args.config)
+    runtime_cfg = cfg.get("runtime", {})
+    log = setup_logger(runtime_cfg.get("log_level", "INFO"),
+                       runtime_cfg.get("log_file"))
+    workers = args.workers or int(runtime_cfg.get("max_workers", 3))
+
+    if args.codes:
+        codes = [c.strip().zfill(6) for c in args.codes.split(",") if c.strip()]
+    else:
+        df = get_stock_list(
+            exclude_chinext_star=cfg["universe"].get("exclude_chinext_star", False),
+            exclude_st=cfg["universe"].get("exclude_st", True),
+            cache_dir=cfg["data"].get("cache_dir", "cache"),
+        )
+        codes = df["code"].tolist()
+
+    log.info("准备刷新 %d 只股票 → data/history/", len(codes))
+    result = history_cache.bulk_refresh(
+        codes=codes,
+        bars=args.bars,
+        adjust=cfg["data"].get("adjust", "qfq"),
+        workers=workers,
+        skip_fresh=not args.force,
+    )
+    print(f"\n刷新完成: ok={result['ok']} skipped={result['skipped']} fail={result['fail']}")
+
+    s = history_cache.stats()
+    print(f"\n当前数据库状态:")
+    print(f"  文件数:    {s['total_files']}")
+    print(f"  占用空间:  {s['total_size_mb']} MB")
+    print(f"  最新文件:  {s['newest_days']} 天前")
+    print(f"  最旧文件:  {s['oldest_days']} 天前")
+    print(f"  平均年龄:  {s['avg_age_days']} 天")
+    return 0
 
 
 def cmd_backtest(args: argparse.Namespace) -> int:

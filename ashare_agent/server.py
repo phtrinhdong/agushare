@@ -28,7 +28,7 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 
 from . import (
-    data_loader, prefetcher, pattern_observer, realtime,
+    data_loader, history_cache, prefetcher, pattern_observer, realtime,
     reporter, storage, visualizer, watchlist as wl,
 )
 from .patterns import (
@@ -273,6 +273,76 @@ class ObserveState:
 
 
 OB_STATE = ObserveState()
+
+
+# ============================================================
+# 历史数据库刷新状态
+# ============================================================
+class HistoryRefreshState:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.running = False
+        self.stop_requested = False
+        self.started_at: float | None = None
+        self.finished_at: float | None = None
+        self.message = "idle"
+        self.error: str | None = None
+        self.progress: dict = {"total": 0, "scanned": 0, "ok": 0,
+                                "fail": 0, "skipped": 0}
+        self.summary: dict = {}
+
+    def reset(self):
+        with self.lock:
+            self.running = True
+            self.stop_requested = False
+            self.started_at = time.time()
+            self.finished_at = None
+            self.message = "刷新中..."
+            self.error = None
+            self.progress = {"total": 0, "scanned": 0, "ok": 0,
+                              "fail": 0, "skipped": 0}
+            self.summary = {}
+
+    def update_progress(self, prog):
+        with self.lock:
+            self.progress = prog
+            self.message = (f"刷新中 {prog['scanned']}/{prog['total']}  "
+                            f"新拉 {prog['ok']} · 跳过 {prog['skipped']} · 失败 {prog['fail']}")
+
+    def finish(self, summary, error=None):
+        with self.lock:
+            self.running = False
+            self.finished_at = time.time()
+            self.summary = summary
+            self.error = error
+            self.message = "完成" if error is None else "失败"
+
+    def request_stop(self):
+        with self.lock:
+            self.stop_requested = True
+
+    def is_stop_requested(self) -> bool:
+        with self.lock:
+            return self.stop_requested
+
+    def to_dict(self) -> dict:
+        with self.lock:
+            elapsed = None
+            if self.started_at:
+                end = self.finished_at or time.time()
+                elapsed = round(end - self.started_at, 1)
+            return {
+                "running": self.running,
+                "stop_requested": self.stop_requested,
+                "message": self.message,
+                "error": self.error,
+                "progress": self.progress,
+                "summary": self.summary,
+                "elapsed_sec": elapsed,
+            }
+
+
+HR_STATE = HistoryRefreshState()
 
 
 # ============================================================
@@ -908,6 +978,86 @@ def observe_list():
                                    time.localtime(fp.stat().st_mtime)),
         })
     return {"items": items[:50]}
+
+
+# ============================================================
+# 历史数据库 (history)
+# ============================================================
+def _run_history_refresh_background(payload: dict):
+    HR_STATE.reset()
+    try:
+        bars = int(payload.get("bars", history_cache.DEFAULT_BARS))
+        scope = payload.get("scope", "all")
+        codes_str = payload.get("codes", "").strip()
+        force = bool(payload.get("force", False))
+        max_workers = int(payload.get("workers",
+                                       _CFG.get("runtime", {}).get("max_workers", 3)))
+
+        # 决定股票池
+        if scope == "custom" and codes_str:
+            codes = [c.strip().zfill(6) for c in codes_str.split(",") if c.strip()]
+        else:
+            df_all = data_loader.get_stock_list(
+                exclude_chinext_star=_CFG["universe"].get("exclude_chinext_star", False),
+                exclude_st=_CFG["universe"].get("exclude_st", True),
+                cache_dir=_CFG["data"].get("cache_dir", "cache"),
+            )
+            codes = df_all["code"].tolist()
+
+        if not codes:
+            raise ValueError("股票池为空")
+
+        prefetcher.pause()
+        result = history_cache.bulk_refresh(
+            codes=codes,
+            bars=bars,
+            adjust=_CFG["data"].get("adjust", "qfq"),
+            workers=max_workers,
+            skip_fresh=not force,
+            on_progress=HR_STATE.update_progress,
+            stop_flag=HR_STATE.is_stop_requested,
+        )
+        HR_STATE.finish(summary=result)
+    except Exception as e:
+        log.exception("history 刷新失败")
+        HR_STATE.finish(summary={}, error=str(e))
+    finally:
+        prefetcher.resume()
+
+
+@app.get("/api/history/stats")
+def history_stats():
+    return history_cache.stats()
+
+
+@app.post("/api/history/refresh")
+def trigger_history_refresh(payload: dict):
+    with HR_STATE.lock:
+        if HR_STATE.running:
+            raise HTTPException(409, "已有刷新任务在跑")
+    if STATE.to_dict()["running"]:
+        raise HTTPException(409, "扫描正在运行,请等扫描完成")
+    if OB_STATE.to_dict()["running"]:
+        raise HTTPException(409, "观察正在运行")
+
+    t = threading.Thread(target=_run_history_refresh_background,
+                         args=(payload,), daemon=True)
+    t.start()
+    return {"ok": True, "message": "已启动后台刷新"}
+
+
+@app.get("/api/history/refresh/status")
+def history_refresh_status():
+    return HR_STATE.to_dict()
+
+
+@app.post("/api/history/refresh/stop")
+def history_refresh_stop():
+    with HR_STATE.lock:
+        if not HR_STATE.running:
+            raise HTTPException(409, "当前没有运行中的刷新")
+    HR_STATE.request_stop()
+    return {"ok": True}
 
 
 @app.get("/api/observe/result/{filename}")
